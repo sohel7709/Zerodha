@@ -14,13 +14,13 @@
       "distribution": "internal",
       "channel": "preview",
       "env": {
-        "EXPO_PUBLIC_API_URL": "https://zerodha-production-cbf1.up.railway.app"
+        "EXPO_PUBLIC_API_URL": "https://zerodha-production-351b.up.railway.app"
       }
     },
     "production": {
       "autoIncrement": true,
       "env": {
-        "EXPO_PUBLIC_API_URL": "https://zerodha-production-cbf1.up.railway.app"
+        "EXPO_PUBLIC_API_URL": "https://zerodha-production-351b.up.railway.app"
       }
     }
   },

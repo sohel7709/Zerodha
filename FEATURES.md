@@ -1069,7 +1069,7 @@ Each `priceMap` entry carries:
 
 | Convention | Rule |
 |-----------|------|
-| **Base URL** | `http://localhost:8080` (dev) · `https://zerodha-production-cbf1.up.railway.app` (prod) |
+| **Base URL** | `http://localhost:8080` (dev) · `https://zerodha-production-351b.up.railway.app` (prod) |
 | **Content-Type** | All requests and responses: `application/json` |
 | **Success codes** | `200 OK` for all success responses (including creates — not 201) |
 | **Error codes** | `400` bad input · `404` not found · `500` server error |
@@ -1446,7 +1446,7 @@ EXPO_PUBLIC_API_URL=http://<your-machine-LAN-IP>:8080
 
 # For production EAS build
 # Set in eas.json → build → production → env
-EXPO_PUBLIC_API_URL=https://zerodha-production-cbf1.up.railway.app
+EXPO_PUBLIC_API_URL=https://zerodha-production-351b.up.railway.app
 ```
 
 #### `mobile/eas.json`
@@ -1461,7 +1461,7 @@ EXPO_PUBLIC_API_URL=https://zerodha-production-cbf1.up.railway.app
     },
     "production": {
       "env": {
-        "EXPO_PUBLIC_API_URL": "https://zerodha-production-cbf1.up.railway.app"
+        "EXPO_PUBLIC_API_URL": "https://zerodha-production-351b.up.railway.app"
       }
     }
   }
@@ -1912,8 +1912,8 @@ git push origin main
 
 # Verify deploy
 railway logs --tail 50
-curl https://zerodha-production-cbf1.up.railway.app/health
-curl https://zerodha-production-cbf1.up.railway.app/market/status
+curl https://zerodha-production-351b.up.railway.app/health
+curl https://zerodha-production-351b.up.railway.app/market/status
 ```
 
 #### Post-deploy

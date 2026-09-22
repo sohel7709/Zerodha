@@ -46,6 +46,13 @@ app.use(express.json({ limit: '50mb' }));
 // Health check — Railway/Render ping this to verify the service is up
 app.get('/', (req, res) => res.json({ status: 'ok', service: 'Zerodha Kite API', version: '1.0.0' }));
 
+// Dedicated health endpoint referenced by backend/railway.json healthcheckPath.
+// Reports DB connectivity so Railway can detect a broken Mongo connection.
+app.get('/health', (req, res) => {
+    const dbStatus = mongoose.connection.readyState === 1 ? 'ok' : 'error';
+    res.json({ status: 'ok', db: dbStatus, service: 'Zerodha Kite API', version: '1.0.0' });
+});
+
 mongoose.connect(MONGO_URI)
     .then(async () => {
         console.log('Connected to MongoDB');
@@ -2801,7 +2808,7 @@ app.get('/admin/token', (req, res) => {
     <div class="tip">
       <strong>Tip — skip copy-paste entirely:</strong><br>
       Set Postback URL in your Dhan app to<br>
-      <code>https://zerodha-production-cbf1.up.railway.app/dhan/token-postback</code><br>
+      <code>https://zerodha-production-351b.up.railway.app/dhan/token-postback</code><br>
       Then just click "Generate Token" — Dhan sends it here automatically.
     </div>
   </div>
@@ -2840,7 +2847,7 @@ app.get('/admin/token', (req, res) => {
 
 // ============ DHAN POSTBACK (auto-receives new token from portal) ============
 // Set this URL in dhanhq.co/developers → your app → Postback URL:
-//   https://zerodha-production-cbf1.up.railway.app/dhan/token-postback
+//   https://zerodha-production-351b.up.railway.app/dhan/token-postback
 app.post('/dhan/token-postback', async (req, res) => {
     // Dhan posts various field names — handle all known variants
     const accessToken =
