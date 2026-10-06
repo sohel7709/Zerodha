@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState, useCallback } from "react";
 import { createChart, AreaSeries } from "lightweight-charts";
 import axios from "axios";
 
-const API_URL = "http://localhost:8080";
+const API_URL = "https://zerodha-production-production.up.railway.app";
 const KITE_BLUE = "#387ed1";
 
 const TIMEFRAMES = [

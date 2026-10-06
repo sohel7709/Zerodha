@@ -11,8 +11,8 @@ import { io } from "socket.io-client";
 
 import GeneralContext from "./GeneralContext";
 
-const SOCKET_URL = "http://localhost:8080";
-const API_URL = "http://localhost:8080";
+const SOCKET_URL = "https://zerodha-production-production.up.railway.app";
+const API_URL = "https://zerodha-production-production.up.railway.app";
 
 const WatchList = () => {
   const [watchlistStocks, setWatchlistStocks] = useState([]);

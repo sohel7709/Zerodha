@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from "react";
 import { io } from "socket.io-client";
 
-const SOCKET_URL = "http://localhost:8080";
+const SOCKET_URL = "https://zerodha-production-production.up.railway.app";
 
 const MarketMovers = () => {
   const [movers, setMovers] = useState({ gainers: [], losers: [], mostActive: [] });

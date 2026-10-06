@@ -2808,7 +2808,7 @@ app.get('/admin/token', (req, res) => {
     <div class="tip">
       <strong>Tip — skip copy-paste entirely:</strong><br>
       Set Postback URL in your Dhan app to<br>
-      <code>https://zerodha-production-351b.up.railway.app/dhan/token-postback</code><br>
+      <code>https://zerodha-production-production.up.railway.app/dhan/token-postback</code><br>
       Then just click "Generate Token" — Dhan sends it here automatically.
     </div>
   </div>
@@ -2847,7 +2847,7 @@ app.get('/admin/token', (req, res) => {
 
 // ============ DHAN POSTBACK (auto-receives new token from portal) ============
 // Set this URL in dhanhq.co/developers → your app → Postback URL:
-//   https://zerodha-production-351b.up.railway.app/dhan/token-postback
+//   https://zerodha-production-production.up.railway.app/dhan/token-postback
 app.post('/dhan/token-postback', async (req, res) => {
     // Dhan posts various field names — handle all known variants
     const accessToken =

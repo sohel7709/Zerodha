@@ -1,7 +1,7 @@
 import React, { useState, useCallback, useMemo } from "react";
 import axios from "axios";
 
-const API_URL = "http://localhost:8080";
+const API_URL = "https://zerodha-production-production.up.railway.app";
 
 /* ─── helpers ──────────────────────────────────────────────────── */
 const fmt = (v, decimals = 2) => {

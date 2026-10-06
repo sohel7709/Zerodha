@@ -4,8 +4,8 @@ import { createChart, CandlestickSeries, LineSeries, AreaSeries, HistogramSeries
 import axios from "axios";
 import { io } from "socket.io-client";
 
-const API_URL = "http://localhost:8080";
-const SOCKET_URL = "http://localhost:8080";
+const API_URL = "https://zerodha-production-production.up.railway.app";
+const SOCKET_URL = "https://zerodha-production-production.up.railway.app";
 const INTRADAY_INTERVALS = ["1m", "5m", "15m"];
 
 const StockChart = () => {

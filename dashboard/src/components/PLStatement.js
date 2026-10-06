@@ -7,7 +7,7 @@ import { Bar } from "react-chartjs-2";
 
 ChartJS.register(BarElement, CategoryScale, LinearScale, Tooltip, Legend);
 
-const API_URL = "http://localhost:8080";
+const API_URL = "https://zerodha-production-production.up.railway.app";
 const KITE_BLUE = "#387ed1";
 
 /* ─── formatters ──────────────────────────────────────────────── */

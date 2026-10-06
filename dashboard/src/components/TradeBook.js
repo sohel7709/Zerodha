@@ -3,7 +3,7 @@ import axios from "axios";
 import jsPDF from "jspdf";
 import "jspdf-autotable";
 
-const API_URL = "http://localhost:8080";
+const API_URL = "https://zerodha-production-production.up.railway.app";
 
 const TradeBook = () => {
   const [trades, setTrades] = useState([]);

@@ -2,8 +2,8 @@ import React, { useState, useEffect, useRef } from "react";
 import { io } from "socket.io-client";
 import axios from "axios";
 
-const SOCKET_URL = "http://localhost:8080";
-const API_URL = "http://localhost:8080";
+const SOCKET_URL = "https://zerodha-production-production.up.railway.app";
+const API_URL = "https://zerodha-production-production.up.railway.app";
 
 const LiveChat = () => {
   const [messages, setMessages] = useState([]);

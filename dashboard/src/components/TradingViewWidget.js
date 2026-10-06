@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import axios from "axios";
 
-const API_URL = "http://localhost:8080";
+const API_URL = "https://zerodha-production-production.up.railway.app";
 
 const TradingViewWidget = () => {
   const [searchParams] = useSearchParams();

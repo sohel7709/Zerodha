@@ -8,7 +8,7 @@ const Orders = () => {
 
   const fetchOrders = () => {
     setLoading(true);
-    axios.get("http://localhost:8080/allOrders")
+    axios.get("https://zerodha-production-production.up.railway.app/allOrders")
       .then(res => {
         setOrders(res.data);
         setLoading(false);

@@ -2,7 +2,7 @@ import React, { useState, useEffect } from "react";
 import { io } from "socket.io-client";
 import { useNavigate } from "react-router-dom";
 
-const SOCKET_URL = "http://localhost:8080";
+const SOCKET_URL = "https://zerodha-production-production.up.railway.app";
 
 const IndexTicker = () => {
   const [indexes, setIndexes] = useState({});

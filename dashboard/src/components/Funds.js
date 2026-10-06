@@ -12,8 +12,8 @@ const Funds = () => {
 
   const fetchData = () => {
     Promise.all([
-      axios.get('http://localhost:8080/wallet'),
-      axios.get('http://localhost:8080/funds'),
+      axios.get('https://zerodha-production-production.up.railway.app/wallet'),
+      axios.get('https://zerodha-production-production.up.railway.app/funds'),
     ])
       .then(([walletRes, txsRes]) => {
         setWallet(walletRes.data);
@@ -38,7 +38,7 @@ const Funds = () => {
     }
 
     const endpoint = txnType === "DEPOSIT" ? "/funds/deposit" : "/funds/withdraw";
-    axios.post(`http://localhost:8080${endpoint}`, { amount: amt })
+    axios.post(`https://zerodha-production-production.up.railway.app${endpoint}`, { amount: amt })
       .then(res => {
         setMessage(res.data.message);
         setAmount("");

@@ -6,7 +6,7 @@ const Holdings = () => {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    axios.get('http://localhost:8080/allHoldings')
+    axios.get('https://zerodha-production-production.up.railway.app/allHoldings')
       .then(res => {
         setAllHoldings(res.data);
         setLoading(false);

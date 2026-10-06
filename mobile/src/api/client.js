@@ -2,11 +2,11 @@ import { io } from 'socket.io-client';
 import Constants from 'expo-constants';
 
 // Production: set EXPO_PUBLIC_API_URL in eas.json env or .env
-// Local dev: set to your machine's IP
+// Falls back to app.json extra.apiUrl, then the production backend URL below.
 export const BASE_URL =
   process.env.EXPO_PUBLIC_API_URL ||
   Constants.expoConfig?.extra?.apiUrl ||
-  'http://10.101.64.71:8080';
+  'https://zerodha-production-production.up.railway.app';
 
 const get = async (path) => {
   const res = await fetch(`${BASE_URL}${path}`);

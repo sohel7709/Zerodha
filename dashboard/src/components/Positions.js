@@ -7,7 +7,7 @@ const Positions = () => {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    axios.get('http://localhost:8080/positions/day')
+    axios.get('https://zerodha-production-production.up.railway.app/positions/day')
       .then(res => {
         setPositions(res.data.positions || []);
         setTotalPnl(res.data.totalPnl || 0);

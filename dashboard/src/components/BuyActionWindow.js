@@ -25,7 +25,7 @@ const BuyActionWindow = ({ uid, mode }) => {
     const q = e.target.value;
     setSearchQuery(q);
     if (q.length > 0) {
-      axios.get(`http://localhost:8080/market/search?q=${q}`)
+      axios.get(`https://zerodha-production-production.up.railway.app/market/search?q=${q}`)
         .then(res => setSearchResults(res.data))
         .catch(() => setSearchResults([]));
     } else {
@@ -49,7 +49,7 @@ const BuyActionWindow = ({ uid, mode }) => {
       productType: productType,
     };
     console.log("Order payload:", payload);
-    axios.post("http://localhost:8080/newOrder", payload)
+    axios.post("https://zerodha-production-production.up.railway.app/newOrder", payload)
       .then(res => {
         console.log("Order response:", res.data);
       })

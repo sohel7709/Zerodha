@@ -3,7 +3,7 @@ import axios from "axios";
 import NotificationsIcon from '@mui/icons-material/Notifications';
 import CheckCircleIcon from '@mui/icons-material/CheckCircle';
 
-const API_URL = "http://localhost:8080";
+const API_URL = "https://zerodha-production-production.up.railway.app";
 
 const Notifications = () => {
   const [alerts, setAlerts] = useState([]);

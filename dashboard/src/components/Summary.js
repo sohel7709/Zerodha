@@ -8,8 +8,8 @@ const Summary = () => {
 
   useEffect(() => {
     Promise.all([
-      axios.get('http://localhost:8080/wallet'),
-      axios.get('http://localhost:8080/allHoldings'),
+      axios.get('https://zerodha-production-production.up.railway.app/wallet'),
+      axios.get('https://zerodha-production-production.up.railway.app/allHoldings'),
     ])
       .then(([walletRes, holdingsRes]) => {
         setWallet(walletRes.data);
