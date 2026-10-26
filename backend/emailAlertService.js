@@ -148,6 +148,38 @@ async function sendTokenFailureAlert({ error, attempts = 3, failedAt = new Date(
                 await sendTelegramAlert({ error, attempts, failedAt }).catch(() => {});
                 return { sent: true, provider: 'resend', id: data.id, recipients };
             }
+
+            // If Resend free testing limitation applies (sending only to account email)
+            if (data && data.name === 'validation_error' && data.message && data.message.includes('only send testing emails to your own email address')) {
+                const match = data.message.match(/\(([^)]+)\)/);
+                const ownerEmail = match ? match[1] : 'contact.buildsoftit@gmail.com';
+                console.log(`[Alert] Resend unverified domain. Delivering to verified account email: ${ownerEmail}`);
+                const fallbackRes = await fetch('https://api.resend.com/emails', {
+                    method: 'POST',
+                    headers: {
+                        'Authorization': `Bearer ${process.env.RESEND_API_KEY}`,
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        from: process.env.RESEND_FROM || 'Zerodha Kite <onboarding@resend.dev>',
+                        to: [ownerEmail],
+                        subject,
+                        html: htmlContent,
+                    }),
+                    signal: AbortSignal.timeout(10000),
+                });
+                const fallbackData = await fallbackRes.json();
+                if (fallbackRes.ok) {
+                    console.log(`[Alert] ✅ Delivered via Resend to account email: ${ownerEmail} (ID: ${fallbackData.id})`);
+                    return {
+                        sent: true,
+                        provider: 'resend',
+                        id: fallbackData.id,
+                        recipients: [ownerEmail],
+                        sandboxNote: 'Delivered to registered email: ' + ownerEmail + '. (To send to other emails too, verify a domain at resend.com/domains).',
+                    };
+                }
+            }
             console.warn('[Alert] Resend API error response:', data);
         } catch (resendErr) {
             console.error('[Alert] Resend API failed:', resendErr.message);
