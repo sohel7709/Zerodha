@@ -135,7 +135,7 @@ async function sendTokenFailureAlert({ error, attempts = 3, failedAt = new Date(
                     'Content-Type': 'application/json',
                 },
                 body: JSON.stringify({
-                    from: process.env.RESEND_FROM || 'Zerodha Kite <onboarding@resend.dev>',
+                    from: process.env.RESEND_FROM || 'Zerodha Kite <alerts@buildsoftit.com>',
                     to: recipients,
                     subject,
                     html: htmlContent,
