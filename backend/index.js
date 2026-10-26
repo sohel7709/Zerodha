@@ -3379,14 +3379,17 @@ app.get('/admin/token', (req, res) => {
     }
 
     async function testEmailAlert() {
-      showToast('⏳ Sending test alert email...', 'info');
+      showToast('⏳ Testing alert delivery...', 'info');
       try {
         const res = await fetch('/admin/test-alert-email', { method: 'POST' });
         const data = await res.json();
         if (data.sent) {
-          showToast('✅ Test alert email sent to ' + data.recipients.join(', '), 'success');
+          const via = data.provider ? ' (via ' + data.provider.toUpperCase() + ')' : '';
+          showToast('✅ Test alert delivered successfully' + via + ' to ' + (data.recipients || []).join(', '), 'success');
+        } else if (data.cloudBlocked) {
+          showToast('⚠️ Railway blocks direct SMTP ports. Add RESEND_API_KEY or TELEGRAM_BOT_TOKEN for 100% cloud delivery over HTTPS.', 'error');
         } else {
-          showToast('⚠️ SMTP not configured yet: ' + (data.reason || data.error), 'error');
+          showToast('⚠️ Alert failed: ' + (data.error || data.reason || 'Check logs'), 'error');
         }
       } catch (err) {
         showToast('❌ Failed to trigger test email: ' + err.message, 'error');

@@ -18,7 +18,7 @@ function getTransporter() {
     }
 
     const host = process.env.SMTP_HOST || 'smtp.gmail.com';
-    const port = Number(process.env.SMTP_PORT) || 587;
+    const port = Number(process.env.SMTP_PORT) || 465;
     const secure = process.env.SMTP_SECURE === 'true' || port === 465;
 
     return nodemailer.createTransport({
@@ -26,36 +26,14 @@ function getTransporter() {
         port,
         secure,
         auth: { user, pass },
-        connectionTimeout: 10000,
-        greetingTimeout: 10000,
-        socketTimeout: 15000,
+        connectionTimeout: 8000,
+        greetingTimeout: 8000,
+        socketTimeout: 10000,
     });
 }
 
-/**
- * Send an urgent alert email if Dhan automated token renewal fails at 8:30 AM IST.
- *
- * @param {Object} opts
- * @param {string} opts.error - The error message
- * @param {number} opts.attempts - Number of attempts made
- * @param {string} [opts.failedAt] - Formatted timestamp
- */
-async function sendTokenFailureAlert({ error, attempts = 3, failedAt = new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' }) }) {
-    const transporter = getTransporter();
-    const recipients = (process.env.ALERT_EMAILS ? process.env.ALERT_EMAILS.split(',') : DEFAULT_RECIPIENTS)
-        .map(e => e.trim())
-        .filter(Boolean);
-
-    if (!transporter) {
-        console.warn('[EmailAlert] ⚠️ Cannot send email alert: SMTP_USER or SMTP_PASS not set in environment variables.');
-        console.warn(`[EmailAlert] Failed to renew token at ${failedAt}. Intended recipients: ${recipients.join(', ')}`);
-        console.warn(`[EmailAlert] Error was: ${error}`);
-        return { sent: false, reason: 'SMTP credentials missing' };
-    }
-
-    const senderEmail = process.env.SMTP_USER || process.env.EMAIL_USER;
-
-    const htmlContent = `
+function buildHtmlTemplate({ error, attempts, failedAt, recipients }) {
+    return `
     <!DOCTYPE html>
     <html>
     <head>
@@ -130,26 +108,163 @@ async function sendTokenFailureAlert({ error, attempts = 3, failedAt = new Date(
     </body>
     </html>
     `;
+}
+
+/**
+ * Send an urgent alert notification via:
+ * 1. Resend HTTPS API (Port 443 - works everywhere, never blocked by Railway/cloud)
+ * 2. Telegram Bot HTTPS API (Port 443 - instant mobile push)
+ * 3. Nodemailer SMTP (fallback)
+ */
+async function sendTokenFailureAlert({ error, attempts = 3, failedAt = new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' }) }) {
+    const recipients = (process.env.ALERT_EMAILS ? process.env.ALERT_EMAILS.split(',') : DEFAULT_RECIPIENTS)
+        .map(e => e.trim())
+        .filter(Boolean);
+
+    const htmlContent = buildHtmlTemplate({ error, attempts, failedAt, recipients });
+    const subject = `🚨 [URGENT] Dhan Token Renewal Failed at 8:30 AM IST (${failedAt})`;
+
+    // ── 1. Resend HTTPS API (Preferred in Cloud: port 443, never blocked) ────────
+    if (process.env.RESEND_API_KEY) {
+        try {
+            console.log('[Alert] Sending email via Resend HTTPS API...');
+            const res = await fetch('https://api.resend.com/emails', {
+                method: 'POST',
+                headers: {
+                    'Authorization': `Bearer ${process.env.RESEND_API_KEY}`,
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    from: process.env.RESEND_FROM || 'Zerodha Kite <onboarding@resend.dev>',
+                    to: recipients,
+                    subject,
+                    html: htmlContent,
+                }),
+                signal: AbortSignal.timeout(10000),
+            });
+            const data = await res.json();
+            if (res.ok) {
+                console.log(`[Alert] ✅ Email delivered via Resend API to: ${recipients.join(', ')} (ID: ${data.id})`);
+                await sendTelegramAlert({ error, attempts, failedAt }).catch(() => {});
+                return { sent: true, provider: 'resend', id: data.id, recipients };
+            }
+            console.warn('[Alert] Resend API error response:', data);
+        } catch (resendErr) {
+            console.error('[Alert] Resend API failed:', resendErr.message);
+        }
+    }
+
+    // ── 2. Brevo (Sendinblue) HTTPS API (Port 443) ──────────────────────────────
+    if (process.env.BREVO_API_KEY) {
+        try {
+            console.log('[Alert] Sending email via Brevo HTTPS API...');
+            const res = await fetch('https://api.brevo.com/v3/smtp/email', {
+                method: 'POST',
+                headers: {
+                    'api-key': process.env.BREVO_API_KEY,
+                    'Content-Type': 'application/json',
+                    'Accept': 'application/json',
+                },
+                body: JSON.stringify({
+                    sender: { name: 'Zerodha Kite Alert', email: process.env.SMTP_USER || 'sohelsp9730@gmail.com' },
+                    to: recipients.map(email => ({ email })),
+                    subject,
+                    htmlContent,
+                }),
+                signal: AbortSignal.timeout(10000),
+            });
+            const data = await res.json();
+            if (res.ok) {
+                console.log(`[Alert] ✅ Email delivered via Brevo API to: ${recipients.join(', ')} (ID: ${data.messageId})`);
+                await sendTelegramAlert({ error, attempts, failedAt }).catch(() => {});
+                return { sent: true, provider: 'brevo', id: data.messageId, recipients };
+            }
+            console.warn('[Alert] Brevo API error response:', data);
+        } catch (brevoErr) {
+            console.error('[Alert] Brevo API failed:', brevoErr.message);
+        }
+    }
+
+    // ── 3. Telegram Push Notification (Over HTTPS, instant phone alert) ─────────
+    let telegramResult = null;
+    if (process.env.TELEGRAM_BOT_TOKEN && process.env.TELEGRAM_CHAT_ID) {
+        telegramResult = await sendTelegramAlert({ error, attempts, failedAt }).catch(() => null);
+    }
+
+    // ── 4. Nodemailer SMTP (Direct TCP) ─────────────────────────────────────────
+    const transporter = getTransporter();
+    if (!transporter) {
+        if (telegramResult && telegramResult.sent) {
+            return { sent: true, provider: 'telegram', note: 'Telegram delivered; SMTP not configured' };
+        }
+        return { sent: false, reason: 'No working email provider or SMTP configured' };
+    }
+
+    const senderEmail = process.env.SMTP_USER || process.env.EMAIL_USER;
 
     try {
         const info = await transporter.sendMail({
             from: `"Zerodha Kite System" <${senderEmail}>`,
             to: recipients.join(', '),
-            subject: `🚨 [URGENT] Dhan Token Renewal Failed at 8:30 AM IST (${failedAt})`,
+            subject,
             html: htmlContent,
             priority: 'high',
         });
 
-        console.log(`[EmailAlert] ✅ Token failure alert email sent to: ${recipients.join(', ')} (Message ID: ${info.messageId})`);
-        return { sent: true, messageId: info.messageId, recipients };
+        console.log(`[EmailAlert] ✅ Token failure alert email sent via SMTP to: ${recipients.join(', ')}`);
+        return { sent: true, provider: 'smtp', messageId: info.messageId, recipients };
     } catch (sendErr) {
-        console.error('[EmailAlert] ❌ Failed to dispatch email alert:', sendErr.message);
-        return { sent: false, error: sendErr.message };
+        console.error('[EmailAlert] ❌ SMTP delivery failed:', sendErr.message);
+        if (telegramResult && telegramResult.sent) {
+            return { sent: true, provider: 'telegram', error: sendErr.message };
+        }
+        return {
+            sent: false,
+            error: sendErr.message,
+            cloudBlocked: sendErr.message.includes('timeout') || sendErr.message.includes('ETIMEDOUT'),
+            recipients,
+        };
+    }
+}
+
+async function sendTelegramAlert({ error, attempts, failedAt }) {
+    const token = process.env.TELEGRAM_BOT_TOKEN;
+    const chatId = process.env.TELEGRAM_CHAT_ID;
+    if (!token || !chatId) return { sent: false, reason: 'Telegram credentials missing' };
+
+    const text = `🚨 *[URGENT] Dhan Token Renewal Failed at 8:30 AM IST*\n\n` +
+                 `🕒 *Time:* ${failedAt} IST\n` +
+                 `🔁 *Attempts:* ${attempts} failed\n` +
+                 `⚠️ *Error:* \`${error}\`\n\n` +
+                 `👉 *[1-Click Manual Renewal](${ADMIN_URL})*`;
+
+    try {
+        const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                chat_id: chatId,
+                text,
+                parse_mode: 'Markdown',
+                disable_web_page_preview: false,
+            }),
+            signal: AbortSignal.timeout(8000),
+        });
+        const data = await res.json();
+        if (data.ok) {
+            console.log('[Alert] ✅ Telegram push alert sent successfully!');
+            return { sent: true };
+        }
+        console.warn('[Alert] Telegram returned not OK:', data);
+        return { sent: false, error: data.description };
+    } catch (e) {
+        console.error('[Alert] Telegram alert error:', e.message);
+        return { sent: false, error: e.message };
     }
 }
 
 /**
- * Send a test email to verify credentials and delivery.
+ * Send a test alert notification to verify credentials.
  */
 async function sendTestEmail() {
     return sendTokenFailureAlert({
