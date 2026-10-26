@@ -33,7 +33,7 @@ const orderEngine = require('./orderEngine');
 const { calcCharges } = require('./chargesService');
 
 const PORT = process.env.PORT || 8080;
-const MONGO_URI = process.env.DATABASE_URL;
+const MONGO_URI = process.env.DATABASE_URL || process.env.MONGO_URL;
 
 const compression = require('compression');
 
@@ -59,13 +59,21 @@ app.get('/health', (req, res) => {
     res.json({ status: 'ok', db: dbStatus, service: 'Zerodha Kite API', version: '1.0.0' });
 });
 
-mongoose.connect(MONGO_URI)
-    .then(async () => {
-        console.log('Connected to MongoDB');
-        await tokenService.loadTokenFromDB();
-        dhanAutoRenew.startAutoRenewCron();
-    })
-    .catch(err => console.error('Error connecting to MongoDB:', err));
+if (MONGO_URI) {
+    mongoose.connect(MONGO_URI)
+        .then(async () => {
+            console.log('Connected to MongoDB');
+            await tokenService.loadTokenFromDB();
+            dhanAutoRenew.startAutoRenewCron();
+        })
+        .catch(err => {
+            console.error('Error connecting to MongoDB:', err);
+            dhanAutoRenew.startAutoRenewCron();
+        });
+} else {
+    console.warn('⚠️ DATABASE_URL not set, starting auto-renew cron directly.');
+    dhanAutoRenew.startAutoRenewCron();
+}
 
 // Merge live market price into a DB document — the stored `ltp` is only a
 // snapshot from the last BUY/SELL and goes stale immediately, which was
