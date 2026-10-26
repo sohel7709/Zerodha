@@ -1,25 +1,22 @@
 import React, { useState, useEffect } from "react";
-import { io } from "socket.io-client";
-
-const SOCKET_URL = "https://zerodha-production-production.up.railway.app";
+import { socket } from "../socket";
 
 const MarketMovers = () => {
   const [movers, setMovers] = useState({ gainers: [], losers: [], mostActive: [] });
   const [lastUpdated, setLastUpdated] = useState(null);
 
   useEffect(() => {
-    const socket = io(SOCKET_URL);
-
-    socket.on("marketData", (data) => {
+    const onMarketData = (data) => {
       if (data.movers) {
         setMovers(data.movers);
       }
       if (data.lastUpdated) {
         setLastUpdated(new Date(data.lastUpdated));
       }
-    });
+    };
 
-    return () => socket.disconnect();
+    socket.on("marketData", onMarketData);
+    return () => socket.off("marketData", onMarketData);
   }, []);
 
   const formatTime = (date) => {

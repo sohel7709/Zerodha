@@ -1,17 +1,15 @@
 import React, { useState, useEffect, useRef } from "react";
-import { io } from "socket.io-client";
+import { socket } from "../socket";
 import axios from "axios";
 
-const SOCKET_URL = "https://zerodha-production-production.up.railway.app";
 const API_URL = "https://zerodha-production-production.up.railway.app";
 
 const LiveChat = () => {
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
   const [username, setUsername] = useState("Trader");
-  const [connected, setConnected] = useState(false);
+  const [connected, setConnected] = useState(socket.connected);
   const messagesEndRef = useRef(null);
-  const socketRef = useRef(null);
 
   useEffect(() => {
     // Load chat history
@@ -19,18 +17,23 @@ const LiveChat = () => {
       .then(res => setMessages(res.data))
       .catch(() => {});
 
-    // Connect to Socket.IO
-    const socket = io(SOCKET_URL);
-    socketRef.current = socket;
-
-    socket.on("connect", () => setConnected(true));
-    socket.on("disconnect", () => setConnected(false));
-
-    socket.on("chatMessage", (msg) => {
+    const onConnect = () => setConnected(true);
+    const onDisconnect = () => setConnected(false);
+    const onChatMessage = (msg) => {
       setMessages(prev => [...prev, msg]);
-    });
+    };
 
-    return () => socket.disconnect();
+    socket.on("connect", onConnect);
+    socket.on("disconnect", onDisconnect);
+    socket.on("chatMessage", onChatMessage);
+
+    if (socket.connected) setConnected(true);
+
+    return () => {
+      socket.off("connect", onConnect);
+      socket.off("disconnect", onDisconnect);
+      socket.off("chatMessage", onChatMessage);
+    };
   }, []);
 
   useEffect(() => {
@@ -39,7 +42,7 @@ const LiveChat = () => {
 
   const sendMessage = () => {
     if (!input.trim()) return;
-    socketRef.current?.emit("chatMessage", {
+    socket.emit("chatMessage", {
       username: username || "Trader",
       message: input.trim(),
       room: "general",

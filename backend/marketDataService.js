@@ -94,14 +94,23 @@ function refPrevClose(symbol, livePrevClose) {
 // Dynamic symbol universe — starts with the core basket, grows as users
 // search / watchlist / trade any NSE share (scrip master covers all of NSE EQ).
 const trackedSymbols = new Set(NSE_STOCK_SYMBOLS);
+let _onTrackCallback = null;
+
+function onTrackSymbol(fn) {
+    _onTrackCallback = fn;
+}
 
 function trackSymbol(symbol) {
     const sym = String(symbol || '').toUpperCase().trim();
     if (!sym || trackedSymbols.has(sym)) return false;
     trackedSymbols.add(sym);
     console.log(`[Market] Now tracking ${sym} (${trackedSymbols.size} symbols)`);
+    if (_onTrackCallback) {
+        try { _onTrackCallback(sym); } catch (e) { /* ignore */ }
+    }
     return true;
 }
+
 
 function getTrackedSymbols() {
     return [...trackedSymbols];
@@ -372,6 +381,105 @@ async function fastRefresh() {
     }
 }
 
+/**
+ * Real-time tick application from DhanFeedService (WebSocket push).
+ * Handles sub-100ms ticks directly into memory with zero HTTP round-trip overhead.
+ */
+function updatePriceTick(tick) {
+    if (!tick || !(tick.ltp > 0)) return null;
+
+    const { symbol, isIndex, ltp } = tick;
+    lastUpdated = new Date().toISOString();
+    dataSource = 'DHAN_LIVE_WS';
+
+    if (isIndex) {
+        if (!indexData[symbol]) {
+            indexData[symbol] = {
+                name: symbol,
+                ltp,
+                previousClose: ltp,
+                change: 0,
+                changePercent: 0,
+                source: 'DHAN_LIVE_WS',
+            };
+        }
+        const entry = indexData[symbol];
+        const pc = entry.previousClose || ltp;
+        if (isSaneTick(entry.ltp, ltp, pc)) {
+            entry.ltp = ltp;
+            if (pc > 0) {
+                const chg = ltp - pc;
+                entry.change = Math.round(chg * 100) / 100;
+                entry.changePercent = Math.round((chg / pc) * 10000) / 100;
+            }
+            entry.source = 'DHAN_LIVE_WS';
+            candleDataService.recordTick(symbol, ltp);
+            return { symbol, isIndex: true, ltp, change: entry.change, changePercent: entry.changePercent };
+        }
+        return null;
+    }
+
+    // Equity stock
+    const key = symbol.toUpperCase();
+    if (stockPrices[key]) {
+        const old = stockPrices[key];
+        const pc = refPrevClose(key, old.previousClose);
+        if (isSaneTick(old.ltp, ltp, pc || old.previousClose)) {
+            const base = pc || old.previousClose || old.ltp;
+            const change = ltp - base;
+            const chgPct = base > 0 ? (change / base) * 100 : 0;
+            stockPrices[key] = {
+                ...old,
+                ltp,
+                previousClose: pc > 0 ? pc : old.previousClose,
+                change: Math.round(change * 100) / 100,
+                changePercent: Math.round(chgPct * 100) / 100,
+                source: 'DHAN_LIVE_WS',
+            };
+            if (tick.high && tick.high > (stockPrices[key].high || 0)) stockPrices[key].high = tick.high;
+            if (tick.low && (stockPrices[key].low === 0 || tick.low < stockPrices[key].low)) stockPrices[key].low = tick.low;
+            if (tick.volume && tick.volume > (stockPrices[key].volume || 0)) stockPrices[key].volume = tick.volume;
+
+            candleDataService.recordTick(key, ltp);
+            return {
+                symbol: key,
+                isIndex: false,
+                ltp,
+                change: stockPrices[key].change,
+                changePercent: stockPrices[key].changePercent,
+            };
+        }
+    } else {
+        const pc = refPrevClose(key, 0);
+        if (!pc || isSaneTick(0, ltp, pc)) {
+            const change = pc > 0 ? ltp - pc : 0;
+            stockPrices[key] = {
+                symbol: key,
+                name: dhanDataService.getSymbolName(key) || key,
+                ltp,
+                open: tick.open || ltp,
+                high: tick.high || ltp,
+                low: tick.low || ltp,
+                previousClose: pc > 0 ? pc : undefined,
+                change: Math.round(change * 100) / 100,
+                changePercent: pc > 0 ? Math.round((change / pc) * 10000) / 100 : 0,
+                source: 'DHAN_LIVE_WS',
+            };
+            candleDataService.recordTick(key, ltp);
+            return {
+                symbol: key,
+                isIndex: false,
+                ltp,
+                change: stockPrices[key].change,
+                changePercent: stockPrices[key].changePercent,
+            };
+        }
+    }
+
+    return null;
+}
+
+
 function getDataSource()   { return dataSource; }
 function getStockPrices()  { return stockPrices; }
 function getIndexData()    { return indexData; }
@@ -626,6 +734,7 @@ async function getOptionLTP(indexName, strikePrice, optionType, expiry) {
 module.exports = {
     fetchAllStockPrices,
     fastRefresh,
+    updatePriceTick,
     seedReferenceCloses,
     getOptionChain,
     getOptionExpiries,
@@ -639,8 +748,10 @@ module.exports = {
     generateOptionChainForIndex,
     getExpiryDates,
     trackSymbol,
+    onTrackSymbol,
     getTrackedSymbols,
     NSE_SYMBOLS,
     NSE_STOCK_SYMBOLS,
     INDEX_SYMBOLS,
 };
+

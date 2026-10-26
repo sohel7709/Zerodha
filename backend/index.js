@@ -25,12 +25,16 @@ const { PLRecordModel } = require('./model/PLRecordModel');
 const { OptionPositionsModel } = require('./model/OptionPositionsModel');
 const { ClosedPositionModel } = require('./model/ClosedPositionModel');
 const dhanDataService = require('./dhanDataService');
+const dhanAuthService = require('./dhanAuthService');
+const { DhanFeedService } = require('./dhanFeedService');
 const rules = require('./marketRules');
 const orderEngine = require('./orderEngine');
 const { calcCharges } = require('./chargesService');
 
 const PORT = process.env.PORT || 8080;
 const MONGO_URI = process.env.DATABASE_URL;
+
+const compression = require('compression');
 
 const app = express();
 const server = http.createServer(app);
@@ -40,6 +44,7 @@ const io = new Server(server, {
 ioInstance = io;
 orderEngine.init(io);
 
+app.use(compression());
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 
@@ -2063,6 +2068,110 @@ function emitMarketData() {
     io.emit('marketData', data);
 }
 
+// ─── Dhan Live WebSocket Feed Manager ──────────────────────────────────────────
+let dhanFeed = null;
+let lastMarketDataEmit = 0;
+let pendingMarketDataEmit = null;
+
+function scheduleMarketDataEmit() {
+    const now = Date.now();
+    // Throttle bulk marketData emits to 250ms to prevent browser DOM lag while maintaining sub-second freshness
+    if (now - lastMarketDataEmit >= 250) {
+        lastMarketDataEmit = now;
+        emitMarketData();
+    } else if (!pendingMarketDataEmit) {
+        pendingMarketDataEmit = setTimeout(() => {
+            pendingMarketDataEmit = null;
+            lastMarketDataEmit = Date.now();
+            emitMarketData();
+        }, 250 - (now - lastMarketDataEmit));
+    }
+}
+
+function initDhanLiveFeed() {
+    if (!dhanDataService.isConfigured()) {
+        console.log('[DhanFeed] Credentials not configured — staying on REST polling fallback');
+        return;
+    }
+
+    try {
+        dhanFeed = new DhanFeedService({
+            clientId: process.env.DHAN_CLIENT_ID,
+            accessToken: process.env.DHAN_ACCESS_TOKEN,
+
+            onTick: (tick) => {
+                const updated = marketDataService.updatePriceTick(tick);
+                if (!updated) return;
+
+                // 1. Instant sub-50ms volatile emission for individual symbol ticks
+                io.volatile.emit('priceTick', {
+                    symbol: updated.symbol,
+                    isIndex: updated.isIndex,
+                    ltp: updated.ltp,
+                    change: updated.change,
+                    changePercent: updated.changePercent,
+                    at: Date.now(),
+                });
+
+                // 2. Throttled bulk marketData emit (250ms frame) for existing UI components
+                scheduleMarketDataEmit();
+
+                // 3. Fast order engine trigger
+                orderEngine.evaluatePendingOrders().catch(() => {});
+                orderEngine.evaluateAlerts().catch(() => {});
+            },
+
+            onStatus: ({ status }) => {
+                console.log(`[DhanFeed] Status: ${status}`);
+            },
+        });
+
+        dhanFeed.connect();
+
+        // Subscribe all major indices
+        const indexSubscriptions = Object.entries(dhanDataService.INDEX_SECURITY_IDS || {}).map(([, id]) => ({
+            segment: 'IDX_I',
+            securityId: id,
+        }));
+        dhanFeed.subscribeTicker(indexSubscriptions);
+
+        // Subscribe all tracked stocks
+        const tracked = marketDataService.getTrackedSymbols();
+        const stockSubscriptions = [];
+        for (const sym of tracked) {
+            const secId = dhanDataService.getSecurityId(sym);
+            if (secId) {
+                stockSubscriptions.push({ segment: 'NSE_EQ', securityId: secId });
+            }
+        }
+        if (stockSubscriptions.length > 0) {
+            dhanFeed.subscribeTicker(stockSubscriptions);
+            console.log(`[DhanFeed] Subscribed ${stockSubscriptions.length} stocks + ${indexSubscriptions.length} indices to WebSocket stream`);
+        }
+
+        // Dynamically subscribe any symbol added during runtime
+        marketDataService.onTrackSymbol((newSym) => {
+            const secId = dhanDataService.getSecurityId(newSym);
+            if (secId && dhanFeed && dhanFeed.isConnected()) {
+                dhanFeed.subscribeTicker([{ segment: 'NSE_EQ', securityId: secId }]);
+                console.log(`[DhanFeed] Dynamically subscribed ${newSym} (SecId: ${secId})`);
+            }
+        });
+
+        // When token is auto-refreshed, reconnect live feed seamlessly
+        dhanAuthService.onTokenUpdated((newToken) => {
+            if (dhanFeed) {
+                console.log('[DhanAuth] Reconnecting DhanFeed with fresh token...');
+                dhanFeed.accessToken = newToken;
+                dhanFeed.disconnect();
+                dhanFeed.connect();
+            }
+        });
+    } catch (err) {
+        console.error('[DhanFeed] Failed to initialize live feed:', err.message);
+    }
+}
+
 // Both intervals below guard against overlapping runs the same way the
 // _pnlTickBusy-guarded interval further down already does. `setInterval`
 // fires on wall-clock schedule regardless of whether the previous async
@@ -2075,8 +2184,8 @@ let _fullBroadcastBusy = false;
 let _fastTickBusy = false;
 
 // Slow OHLC snapshot — one batched Dhan /marketfeed/quote (stocks + indices)
-// for OHLC/previousClose/52W. Runs on boot (seed) and every 15s. The 1s fast
-// tick handles live LTP movement between these.
+// for OHLC/previousClose/52W. Runs on boot (seed) and every 15s. The WebSocket
+// feed handles real-time LTP movement between these.
 async function broadcastMarketData() {
     if (_fullBroadcastBusy) return;
     _fullBroadcastBusy = true;
@@ -2089,18 +2198,21 @@ async function broadcastMarketData() {
     }
 }
 
-// Fast LTP-only refresh — runs every 1s during market hours. Uses 'FO' (the
-// wider 15:40 window) since this feeds both equity and option live ticks.
+// Fast LTP tick loop — when WebSocket feed is connected and healthy, ticks
+// arrive continuously via push with sub-100ms latency. If WebSocket drops,
+// this seamlessly acts as fallback REST polling every 1s.
 async function fastTickBroadcast() {
     if (!isMarketOpen('FO') || _fastTickBusy) return;
     _fastTickBusy = true;
     try {
-        await marketDataService.fastRefresh();
-        emitMarketData();
+        // Fallback REST poll only if WebSocket is not connected
+        if (!dhanFeed || !dhanFeed.isConnected()) {
+            await marketDataService.fastRefresh();
+            emitMarketData();
+        }
 
         // Order-engine ticks: fill resting LIMIT/SL/SL-M orders, fire GTT/alerts,
-        // and square off MIS positions at 3:20 PM — all against the price data
-        // that was just refreshed above.
+        // and square off MIS positions at 3:20 PM
         try {
             await orderEngine.evaluatePendingOrders();
             await orderEngine.evaluateAlerts();
@@ -2323,6 +2435,7 @@ async function trackPortfolioSymbols() {
     await marketDataService.fastRefresh();
     await broadcastMarketData();
     await prepareNewTradingDay();
+    initDhanLiveFeed();
 })();
 // Dhan-only, two-tier (no Groww/Yahoo):
 //  • fast tick every 1s → LTP endpoint (light, safely sustains 1 req/s) for
@@ -2747,103 +2860,527 @@ app.post('/optionPositions/:id/squareoff', async (req, res) => {
 });
 
 // ============ ADMIN TOKEN WEB PAGE ============
-// Open http://your-server:8080/admin/token in any browser — paste token, save.
+// Open http://your-server:8080/admin/token in any browser — live status, 1-click refresh, manual paste.
 app.get('/admin/token', (req, res) => {
-    const status = tokenService.getTokenStatus();
-    const statusColor = status.expired ? '#ef4444' : status.status === 'EXPIRING_SOON' ? '#f59e0b' : '#22c55e';
-    const statusText  = status.expired ? `EXPIRED` : status.hoursLeft != null ? `Valid — ${status.hoursLeft}h left` : 'Unknown';
-    const expiresLine = status.expiresAt ? `Expires: ${new Date(status.expiresAt).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })} IST` : '';
-
     res.send(`<!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Dhan Token Update</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>DhanHQ Token Manager — Kite</title>
   <style>
+    :root {
+      --primary: #387ed1;
+      --primary-hover: #2968b2;
+      --success: #10b981;
+      --warning: #f59e0b;
+      --danger: #ef4444;
+      --bg: #f8fafc;
+      --card-bg: #ffffff;
+      --text: #0f172a;
+      --text-muted: #64748b;
+      --border: #e2e8f0;
+    }
     * { box-sizing: border-box; margin: 0; padding: 0; }
-    body { font-family: -apple-system, sans-serif; background: #f5f5f5; display: flex; justify-content: center; padding: 24px 16px; }
-    .card { background: #fff; border-radius: 12px; padding: 28px; max-width: 520px; width: 100%; box-shadow: 0 2px 12px rgba(0,0,0,0.08); }
-    h1 { font-size: 20px; font-weight: 700; color: #1e293b; margin-bottom: 4px; }
-    .sub { font-size: 13px; color: #64748b; margin-bottom: 20px; }
-    .badge { display: inline-flex; align-items: center; gap: 6px; padding: 6px 12px; border-radius: 20px; background: #f1f5f9; margin-bottom: 8px; }
-    .dot { width: 8px; height: 8px; border-radius: 50%; background: ${statusColor}; }
-    .badge-txt { font-size: 13px; font-weight: 600; color: ${statusColor}; }
-    .expires { font-size: 12px; color: #94a3b8; margin-bottom: 20px; }
-    label { font-size: 13px; font-weight: 600; color: #374151; display: block; margin-bottom: 6px; }
-    .step { font-size: 12px; color: #64748b; margin-bottom: 14px; line-height: 1.6; }
-    .step a { color: #3b82f6; }
-    textarea { width: 100%; border: 1.5px solid #e2e8f0; border-radius: 8px; padding: 12px; font-size: 12px; font-family: monospace; color: #334155; resize: vertical; min-height: 90px; margin-bottom: 14px; outline: none; }
-    textarea:focus { border-color: #3b82f6; }
-    input[type=text] { width: 100%; border: 1.5px solid #e2e8f0; border-radius: 8px; padding: 10px 12px; font-size: 14px; color: #334155; margin-bottom: 14px; outline: none; }
-    input:focus { border-color: #3b82f6; }
-    button { width: 100%; background: #2563eb; color: #fff; border: none; border-radius: 8px; padding: 13px; font-size: 15px; font-weight: 700; cursor: pointer; }
-    button:hover { background: #1d4ed8; }
-    .result { margin-top: 14px; padding: 12px; border-radius: 8px; font-size: 13px; display: none; }
-    .ok  { background: #f0fdf4; color: #15803d; border: 1px solid #bbf7d0; }
-    .err { background: #fef2f2; color: #dc2626; border: 1px solid #fecaca; }
-    .tip { background: #eff6ff; border: 1px solid #bfdbfe; border-radius: 8px; padding: 12px; font-size: 12px; color: #1d4ed8; line-height: 1.6; margin-top: 18px; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      display: flex;
+      justify-content: center;
+      padding: 32px 16px;
+      min-height: 100vh;
+    }
+    .container {
+      max-width: 620px;
+      width: 100%;
+    }
+    .header {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 24px;
+    }
+    .logo {
+      width: 44px;
+      height: 44px;
+      border-radius: 50%;
+      background: var(--primary);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #fff;
+      font-weight: 800;
+      font-size: 20px;
+      box-shadow: 0 4px 12px rgba(56, 126, 209, 0.25);
+    }
+    .title-box h1 {
+      font-size: 20px;
+      font-weight: 700;
+      color: #1e293b;
+    }
+    .title-box p {
+      font-size: 13px;
+      color: var(--text-muted);
+    }
+    .card {
+      background: var(--card-bg);
+      border-radius: 16px;
+      border: 1px solid var(--border);
+      padding: 24px;
+      box-shadow: 0 4px 20px -2px rgba(0,0,0,0.05);
+      margin-bottom: 20px;
+    }
+    .hero-status {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 20px;
+    }
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 14px;
+      border-radius: 9999px;
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.5px;
+      text-transform: uppercase;
+    }
+    .badge.active { background: #ecfdf5; color: #059669; border: 1px solid #a7f3d0; }
+    .badge.warning { background: #fffbeb; color: #d97706; border: 1px solid #fde68a; }
+    .badge.expired { background: #fef2f2; color: #dc2626; border: 1px solid #fecaca; }
+    .pulse-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: currentColor;
+      box-shadow: 0 0 0 0 currentColor;
+      animation: pulse 2s infinite;
+    }
+    @keyframes pulse {
+      0% { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.4); }
+      70% { box-shadow: 0 0 0 8px rgba(16, 185, 129, 0); }
+      100% { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0); }
+    }
+    .countdown-box {
+      background: #f1f5f9;
+      border-radius: 12px;
+      padding: 16px 20px;
+      margin-bottom: 20px;
+      text-align: center;
+    }
+    .countdown-label {
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      margin-bottom: 6px;
+    }
+    .countdown-timer {
+      font-size: 32px;
+      font-weight: 800;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      color: #0f172a;
+      letter-spacing: -0.5px;
+    }
+    .progress-bar-wrap {
+      width: 100%;
+      height: 6px;
+      background: #e2e8f0;
+      border-radius: 999px;
+      overflow: hidden;
+      margin-top: 12px;
+    }
+    .progress-bar-fill {
+      height: 100%;
+      background: var(--success);
+      width: 100%;
+      transition: width 0.4s ease, background 0.4s ease;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 12px;
+      margin-bottom: 24px;
+    }
+    @media (max-width: 500px) {
+      .grid { grid-template-columns: 1fr; }
+    }
+    .info-tile {
+      background: #f8fafc;
+      border: 1px solid #f1f5f9;
+      border-radius: 10px;
+      padding: 12px 14px;
+    }
+    .info-label {
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      margin-bottom: 4px;
+    }
+    .info-val {
+      font-size: 13px;
+      font-weight: 600;
+      color: #1e293b;
+      word-break: break-all;
+    }
+    .btn-main {
+      width: 100%;
+      background: var(--primary);
+      color: #fff;
+      border: none;
+      border-radius: 12px;
+      padding: 14px 20px;
+      font-size: 15px;
+      font-weight: 700;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 10px;
+      transition: all 0.2s ease;
+      box-shadow: 0 4px 14px rgba(56, 126, 209, 0.3);
+    }
+    .btn-main:hover {
+      background: var(--primary-hover);
+      transform: translateY(-1px);
+    }
+    .btn-main:active {
+      transform: translateY(0);
+    }
+    .btn-main:disabled {
+      background: #94a3b8;
+      cursor: not-allowed;
+      box-shadow: none;
+      transform: none;
+    }
+    .spinner {
+      width: 18px;
+      height: 18px;
+      border: 2px solid rgba(255,255,255,0.3);
+      border-radius: 50%;
+      border-top-color: #fff;
+      animation: spin 0.8s linear infinite;
+      display: none;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .toast {
+      margin-top: 14px;
+      padding: 12px 16px;
+      border-radius: 10px;
+      font-size: 13px;
+      display: none;
+      line-height: 1.5;
+    }
+    .toast.success { background: #ecfdf5; color: #065f46; border: 1px solid #a7f3d0; }
+    .toast.error   { background: #fef2f2; color: #991b1b; border: 1px solid #fecaca; }
+    .toast.info    { background: #eff6ff; color: #1e40af; border: 1px solid #bfdbfe; }
+    details {
+      margin-top: 24px;
+      border-top: 1px solid var(--border);
+      padding-top: 16px;
+    }
+    summary {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--primary);
+      cursor: pointer;
+      user-select: none;
+      margin-bottom: 14px;
+    }
+    summary:hover { text-decoration: underline; }
+    textarea {
+      width: 100%;
+      border: 1.5px solid #cbd5e1;
+      border-radius: 8px;
+      padding: 10px 12px;
+      font-size: 12px;
+      font-family: monospace;
+      color: #334155;
+      min-height: 80px;
+      margin-bottom: 12px;
+      outline: none;
+    }
+    textarea:focus { border-color: var(--primary); }
+    .btn-secondary {
+      width: 100%;
+      background: #f1f5f9;
+      color: #334155;
+      border: 1px solid #cbd5e1;
+      border-radius: 8px;
+      padding: 10px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .btn-secondary:hover { background: #e2e8f0; }
+    .cron-info {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 12px;
+      color: #059669;
+      background: #ecfdf5;
+      padding: 10px 14px;
+      border-radius: 8px;
+      margin-top: 16px;
+      border: 1px solid #a7f3d0;
+    }
   </style>
 </head>
 <body>
-  <div class="card">
-    <h1>Dhan Token</h1>
-    <p class="sub">Update your Dhan API access token</p>
-    <div class="badge"><div class="dot"></div><span class="badge-txt">${statusText}</span></div>
-    <p class="expires">${expiresLine}</p>
+  <div class="container">
+    <div class="header">
+      <div class="logo">K</div>
+      <div class="title-box">
+        <h1>DhanHQ API Token Manager</h1>
+        <p>Live session status & 1-click automated renewal</p>
+      </div>
+    </div>
 
-    <p class="step">
-      1. Go to <a href="https://dhanhq.co/developers" target="_blank">dhanhq.co/developers</a><br>
-      2. Click your app → <strong>Generate Token</strong> (enter OTP)<br>
-      3. Copy the access token and paste below
-    </p>
+    <div class="card">
+      <div class="hero-status">
+        <span style="font-size: 13px; font-weight: 700; color: #475569;">SESSION HEALTH</span>
+        <div id="statusBadge" class="badge active">
+          <div class="pulse-dot"></div>
+          <span id="badgeText">CHECKING...</span>
+        </div>
+      </div>
 
-    <label>Client ID</label>
-    <input type="text" id="clientId" value="${status.clientId || ''}" placeholder="e.g. 1112426535" />
-    <label>New Access Token</label>
-    <textarea id="token" placeholder="Paste eyJ... token here"></textarea>
-    <button onclick="save()">Save Token</button>
-    <div id="result" class="result"></div>
+      <div class="countdown-box">
+        <div class="countdown-label">Time Remaining Until Expiry</div>
+        <div id="countdownTimer" class="countdown-timer">--:--:--</div>
+        <div class="progress-bar-wrap">
+          <div id="progressBar" class="progress-bar-fill"></div>
+        </div>
+      </div>
 
-    <div class="tip">
-      <strong>Tip — skip copy-paste entirely:</strong><br>
-      Set Postback URL in your Dhan app to<br>
-      <code>https://zerodha-production-production.up.railway.app/dhan/token-postback</code><br>
-      Then just click "Generate Token" — Dhan sends it here automatically.
+      <div class="grid">
+        <div class="info-tile">
+          <div class="info-label">Account Holder</div>
+          <div id="clientName" class="info-val">Loading...</div>
+        </div>
+        <div class="info-tile">
+          <div class="info-label">Dhan Client ID</div>
+          <div id="clientId" class="info-val">Loading...</div>
+        </div>
+        <div class="info-tile">
+          <div class="info-label">Expires At (IST)</div>
+          <div id="expiryDate" class="info-val">Loading...</div>
+        </div>
+        <div class="info-tile">
+          <div class="info-label">Issued At</div>
+          <div id="issuedDate" class="info-val">Loading...</div>
+        </div>
+      </div>
+
+      <button id="refreshBtn" class="btn-main" onclick="triggerAutoRefresh()">
+        <span class="spinner" id="btnSpinner"></span>
+        <span id="btnIcon">⚡</span>
+        <span id="btnLabel">Generate Fresh Token Now (1-Click TOTP)</span>
+      </button>
+
+      <div id="toast" class="toast"></div>
+
+      <div class="cron-info">
+        <span>⏱️</span>
+        <span><strong>Automated Background Renewal:</strong> Active every weekday at 8:30 AM IST + 3-hour safety loop.</span>
+      </div>
+
+      <details>
+        <summary>Emergency Manual Override (Paste Token)</summary>
+        <p style="font-size: 12px; color: var(--text-muted); margin-bottom: 8px;">
+          If Dhan TOTP auth is ever unreachable, generate a token at <a href="https://dhanhq.co/developers" target="_blank" style="color: var(--primary);">dhanhq.co/developers</a> and paste it below:
+        </p>
+        <textarea id="manualToken" placeholder="Paste eyJ... access token here"></textarea>
+        <button class="btn-secondary" onclick="saveManualToken()">Save Token Manually</button>
+      </details>
     </div>
   </div>
+
   <script>
-    async function save() {
-      const clientId = document.getElementById('clientId').value.trim();
-      const token    = document.getElementById('token').value.trim();
-      const res      = document.getElementById('result');
-      if (!clientId || !token) { showResult('Enter both Client ID and Access Token', false); return; }
+    let expiresAtMs = 0;
+    let countdownInterval = null;
+
+    async function loadStatus() {
       try {
-        const r = await fetch('/admin/update-token', {
+        const res = await fetch('/admin/token-status');
+        const data = await res.json();
+        updateUI(data);
+      } catch (err) {
+        console.error('Failed to fetch status:', err);
+      }
+    }
+
+    function updateUI(data) {
+      const auth = data.authService || {};
+      const expDate = data.expiresAt || auth.expiryTime;
+      const isExpired = data.expired || (expDate && new Date(expDate).getTime() <= Date.now());
+
+      document.getElementById('clientId').textContent = data.clientId || auth.clientId || 'Not set';
+      document.getElementById('clientName').textContent = auth.clientName || data.clientName || 'PATHAN SOHEL AYUB';
+
+      if (expDate) {
+        expiresAtMs = new Date(expDate).getTime();
+        document.getElementById('expiryDate').textContent = new Date(expDate).toLocaleString('en-IN', {
+          timeZone: 'Asia/Kolkata',
+          dateStyle: 'medium',
+          timeStyle: 'medium'
+        }) + ' IST';
+      } else {
+        document.getElementById('expiryDate').textContent = 'Unknown';
+      }
+
+      if (data.issuedAt) {
+        document.getElementById('issuedDate').textContent = new Date(data.issuedAt).toLocaleString('en-IN', {
+          timeZone: 'Asia/Kolkata',
+          dateStyle: 'medium',
+          timeStyle: 'short'
+        });
+      } else {
+        document.getElementById('issuedDate').textContent = 'Recent';
+      }
+
+      // Badge & Status color
+      const badge = document.getElementById('statusBadge');
+      const badgeText = document.getElementById('badgeText');
+      const progressBar = document.getElementById('progressBar');
+
+      if (isExpired) {
+        badge.className = 'badge expired';
+        badgeText.textContent = 'EXPIRED';
+        progressBar.style.background = '#ef4444';
+        progressBar.style.width = '0%';
+        document.getElementById('countdownTimer').textContent = '00:00:00 (EXPIRED)';
+      } else {
+        const msLeft = Math.max(0, expiresAtMs - Date.now());
+        const hoursLeft = msLeft / (1000 * 3600);
+        if (hoursLeft < 2) {
+          badge.className = 'badge warning';
+          badgeText.textContent = 'EXPIRING SOON';
+          progressBar.style.background = '#f59e0b';
+        } else {
+          badge.className = 'badge active';
+          badgeText.textContent = 'ACTIVE & HEALTHY';
+          progressBar.style.background = '#10b981';
+        }
+      }
+
+      startCountdown();
+    }
+
+    function startCountdown() {
+      if (countdownInterval) clearInterval(countdownInterval);
+      tick();
+      countdownInterval = setInterval(tick, 1000);
+    }
+
+    function tick() {
+      if (!expiresAtMs) return;
+      const diff = expiresAtMs - Date.now();
+      const timerEl = document.getElementById('countdownTimer');
+      const progressEl = document.getElementById('progressBar');
+
+      if (diff <= 0) {
+        timerEl.textContent = '00:00:00 (EXPIRED)';
+        progressEl.style.width = '0%';
+        progressEl.style.background = '#ef4444';
+        return;
+      }
+
+      const h = Math.floor(diff / (1000 * 60 * 60));
+      const m = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60));
+      const s = Math.floor((diff % (1000 * 60)) / 1000);
+
+      timerEl.textContent = String(h).padStart(2, '0') + 'h ' +
+                            String(m).padStart(2, '0') + 'm ' +
+                            String(s).padStart(2, '0') + 's';
+
+      // 24 hour percentage
+      const totalWindow = 24 * 60 * 60 * 1000;
+      const pct = Math.min(100, Math.max(0, (diff / totalWindow) * 100));
+      progressEl.style.width = pct.toFixed(1) + '%';
+    }
+
+    async function triggerAutoRefresh() {
+      const btn = document.getElementById('refreshBtn');
+      const spinner = document.getElementById('btnSpinner');
+      const icon = document.getElementById('btnIcon');
+      const label = document.getElementById('btnLabel');
+
+      btn.disabled = true;
+      spinner.style.display = 'inline-block';
+      icon.style.display = 'none';
+      label.textContent = 'Generating TOTP & Authenticating with Dhan...';
+      hideToast();
+
+      try {
+        const res = await fetch('/admin/refresh-token', { method: 'POST' });
+        const data = await res.json();
+
+        if (res.ok) {
+          showToast('✅ Success! Fresh 24-hour Dhan token generated and live feed reconnected.', 'success');
+          await loadStatus();
+        } else {
+          showToast('❌ ' + (data.error || data.message || 'Generation failed'), 'error');
+        }
+      } catch (err) {
+        showToast('❌ Network error: ' + err.message, 'error');
+      } finally {
+        btn.disabled = false;
+        spinner.style.display = 'none';
+        icon.style.display = 'inline-block';
+        label.textContent = 'Generate Fresh Token Now (1-Click TOTP)';
+      }
+    }
+
+    async function saveManualToken() {
+      const token = document.getElementById('manualToken').value.trim();
+      const clientId = document.getElementById('clientId').textContent.trim();
+      if (!token) return showToast('Please paste a valid access token', 'error');
+
+      try {
+        const res = await fetch('/admin/update-token', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ clientId, accessToken: token }),
+          body: JSON.stringify({ clientId, accessToken: token })
         });
-        const data = await r.json();
-        if (r.ok) {
-          const exp = data.expiresAt ? new Date(data.expiresAt).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' }) : '';
-          showResult('✅ Token updated! Expires: ' + exp + ' IST', true);
-          setTimeout(() => location.reload(), 2000);
+        const data = await res.json();
+        if (res.ok) {
+          showToast('✅ Manual token saved successfully!', 'success');
+          document.getElementById('manualToken').value = '';
+          await loadStatus();
         } else {
-          showResult('❌ ' + (data.message || 'Update failed'), false);
+          showToast('❌ ' + (data.message || 'Failed to save'), 'error');
         }
-      } catch(e) { showResult('❌ Network error: ' + e.message, false); }
+      } catch (err) {
+        showToast('❌ Network error: ' + err.message, 'error');
+      }
     }
-    function showResult(msg, ok) {
-      const el = document.getElementById('result');
+
+    function showToast(msg, type) {
+      const el = document.getElementById('toast');
       el.textContent = msg;
-      el.className = 'result ' + (ok ? 'ok' : 'err');
+      el.className = 'toast ' + type;
       el.style.display = 'block';
     }
+
+    function hideToast() {
+      document.getElementById('toast').style.display = 'none';
+    }
+
+    // Initial load + poll every 10 seconds for real-time freshness
+    loadStatus();
+    setInterval(loadStatus, 10000);
   </script>
 </body>
 </html>`);
 });
+
 
 // ============ DHAN POSTBACK (auto-receives new token from portal) ============
 // Set this URL in dhanhq.co/developers → your app → Postback URL:
@@ -2889,7 +3426,19 @@ app.post('/admin/update-token', async (req, res) => {
 });
 
 app.get('/admin/token-status', (req, res) => {
-    res.json(tokenService.getTokenStatus());
+    res.json({
+        ...tokenService.getTokenStatus(),
+        authService: dhanAuthService.getStatus(),
+    });
+});
+
+app.post('/admin/refresh-token', async (req, res) => {
+    try {
+        const result = await dhanAuthService.generateToken();
+        res.json({ message: 'Token refreshed successfully via Dhan TOTP', ...result });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
 // ============ START SERVER ============

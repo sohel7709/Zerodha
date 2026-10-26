@@ -7,17 +7,35 @@ import BarChartIcon from '@mui/icons-material/BarChart';
 import DeleteOutlineIcon from '@mui/icons-material/DeleteOutline';
 import SearchIcon from '@mui/icons-material/Search';
 import axios from "axios";
-import { io } from "socket.io-client";
+import { socket } from "../socket";
 
 import GeneralContext from "./GeneralContext";
 
-const SOCKET_URL = "https://zerodha-production-production.up.railway.app";
 const API_URL = "https://zerodha-production-production.up.railway.app";
 
+// Helper to safely load cached data synchronously for 0ms initial paint
+const getInitialWatchlist = () => {
+  try {
+    const raw = localStorage.getItem("cached_watchlist");
+    return raw ? JSON.parse(raw) : [];
+  } catch {
+    return [];
+  }
+};
+
+const getInitialPrices = () => {
+  try {
+    const raw = localStorage.getItem("cached_prices");
+    return raw ? JSON.parse(raw) : {};
+  } catch {
+    return {};
+  }
+};
+
 const WatchList = () => {
-  const [watchlistStocks, setWatchlistStocks] = useState([]);
-  const [livePrices, setLivePrices] = useState({});
-  const [loading, setLoading] = useState(true);
+  const [watchlistStocks, setWatchlistStocks] = useState(getInitialWatchlist);
+  const [livePrices, setLivePrices] = useState(getInitialPrices);
+  const [loading, setLoading] = useState(() => getInitialWatchlist().length === 0);
   const [watchlistId, setWatchlistId] = useState(null);
   const [query, setQuery] = useState("");
   const [results, setResults] = useState([]);
@@ -35,6 +53,7 @@ const WatchList = () => {
             isDown: false,
           }));
           setWatchlistStocks(stocks);
+          try { localStorage.setItem("cached_watchlist", JSON.stringify(stocks)); } catch {}
         }
         setLoading(false);
       })
@@ -47,20 +66,38 @@ const WatchList = () => {
   useEffect(() => {
     loadWatchlist();
 
-    // Connect to Socket.IO for live prices
-    const socket = io(SOCKET_URL);
-
-    socket.on("marketData", (data) => {
+    const onMarketData = (data) => {
       if (data.prices) {
         setLivePrices(data.prices);
+        try { localStorage.setItem("cached_prices", JSON.stringify(data.prices)); } catch {}
       }
-    });
+    };
 
-    socket.on("connect", () => {
-      console.log("WatchList: Socket connected");
-    });
+    const onPriceTick = (tick) => {
+      if (!tick.isIndex && tick.symbol) {
+        setLivePrices(prev => {
+          const existing = prev[tick.symbol] || {};
+          const updated = {
+            ...prev,
+            [tick.symbol]: {
+              ...existing,
+              ltp: tick.ltp,
+              change: tick.change,
+              changePercent: tick.changePercent,
+            }
+          };
+          return updated;
+        });
+      }
+    };
 
-    return () => socket.disconnect();
+    socket.on("marketData", onMarketData);
+    socket.on("priceTick", onPriceTick);
+
+    return () => {
+      socket.off("marketData", onMarketData);
+      socket.off("priceTick", onPriceTick);
+    };
   }, []);
 
   // Search the full NSE universe as the user types (debounced)

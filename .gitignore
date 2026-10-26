@@ -17,6 +17,7 @@ dist/
 # Agent / local tooling
 .claude/
 .gstack/
+.vscode/
 
 # OS / logs
 .DS_Store

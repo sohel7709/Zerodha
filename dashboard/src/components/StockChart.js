@@ -2,10 +2,9 @@ import React, { useEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { createChart, CandlestickSeries, LineSeries, AreaSeries, HistogramSeries } from "lightweight-charts";
 import axios from "axios";
-import { io } from "socket.io-client";
+import { socket } from "../socket";
 
 const API_URL = "https://zerodha-production-production.up.railway.app";
-const SOCKET_URL = "https://zerodha-production-production.up.railway.app";
 const INTRADAY_INTERVALS = ["1m", "5m", "15m"];
 
 const StockChart = () => {
@@ -18,7 +17,6 @@ const StockChart = () => {
   const smaSeriesRef = useRef(null);
   const emaSeriesRef = useRef(null);
   const lastCandleRef = useRef(null);
-  const socketRef = useRef(null);
   const [interval, setInterval_] = useState("15m");
   const [chartType, setChartType] = useState("candlestick");
   const [indicators, setIndicators] = useState({ sma: true, ema: false, bollinger: false });
@@ -39,17 +37,7 @@ const StockChart = () => {
     };
   }, []);
 
-  // Live tick stream: patch LTP + the last candle on every broadcast so the
-  // chart keeps moving between REST refreshes instead of sitting static.
   useEffect(() => {
-    const socket = io(SOCKET_URL);
-    socketRef.current = socket;
-    return () => socket.disconnect();
-  }, []);
-
-  useEffect(() => {
-    const socket = socketRef.current;
-    if (!socket) return;
     const handler = (data) => {
       const live = data.prices && data.prices[symbol];
       if (!live || !live.ltp) return;
@@ -72,8 +60,40 @@ const StockChart = () => {
         candleSeriesRef.current.update({ time: last.time, value: live.ltp });
       }
     };
+
+    const tickHandler = (tick) => {
+      if (tick.symbol !== symbol || !tick.ltp) return;
+      setQuote((prev) => ({
+        ...(prev || {}),
+        ltp: tick.ltp,
+        change: tick.change,
+        changePercent: tick.changePercent,
+      }));
+
+      const last = lastCandleRef.current;
+      if (!candleSeriesRef.current || !last) return;
+      if (chartType === "candlestick") {
+        const updated = {
+          time: last.time,
+          open: last.open,
+          high: Math.max(last.high, tick.ltp),
+          low: Math.min(last.low, tick.ltp),
+          close: tick.ltp,
+        };
+        lastCandleRef.current = updated;
+        candleSeriesRef.current.update(updated);
+      } else {
+        lastCandleRef.current = { ...last, close: tick.ltp };
+        candleSeriesRef.current.update({ time: last.time, value: tick.ltp });
+      }
+    };
+
     socket.on("marketData", handler);
-    return () => socket.off("marketData", handler);
+    socket.on("priceTick", tickHandler);
+    return () => {
+      socket.off("marketData", handler);
+      socket.off("priceTick", tickHandler);
+    };
   }, [symbol, chartType]);
 
   // Re-fetch full candle set periodically for intraday intervals so new

@@ -7,9 +7,9 @@ const SplashScreen = ({ onDone }) => {
   const [fade, setFade] = useState(false);
 
   useEffect(() => {
-    // Start fade-out after 1.8s, then call onDone at 2.2s
-    const fadeTimer = setTimeout(() => setFade(true), 1800);
-    const doneTimer = setTimeout(() => onDone(), 2200);
+    // Quick, smooth 400ms brand transition instead of 2.2s delay
+    const fadeTimer = setTimeout(() => setFade(true), 350);
+    const doneTimer = setTimeout(() => onDone(), 550);
     return () => { clearTimeout(fadeTimer); clearTimeout(doneTimer); };
   }, [onDone]);
 

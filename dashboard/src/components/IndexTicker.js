@@ -1,33 +1,64 @@
 import React, { useState, useEffect } from "react";
-import { io } from "socket.io-client";
+import { socket } from "../socket";
 import { useNavigate } from "react-router-dom";
 
-const SOCKET_URL = "https://zerodha-production-production.up.railway.app";
+const getInitialIndexes = () => {
+  try {
+    const raw = localStorage.getItem("cached_indexes");
+    return raw ? JSON.parse(raw) : {};
+  } catch {
+    return {};
+  }
+};
 
 const IndexTicker = () => {
-  const [indexes, setIndexes] = useState({});
-  const [connected, setConnected] = useState(false);
+  const [indexes, setIndexes] = useState(getInitialIndexes);
+  const [connected, setConnected] = useState(socket.connected);
   const navigate = useNavigate();
 
   useEffect(() => {
-    const socket = io(SOCKET_URL);
+    const onConnect = () => setConnected(true);
+    const onDisconnect = () => setConnected(false);
 
-    socket.on("connect", () => {
-      setConnected(true);
-      console.log("IndexTicker: Socket connected");
-    });
-
-    socket.on("marketData", (data) => {
+    const onMarketData = (data) => {
       if (data.indexes) {
         setIndexes(data.indexes);
+        try { localStorage.setItem("cached_indexes", JSON.stringify(data.indexes)); } catch {}
       }
-    });
+    };
 
-    socket.on("disconnect", () => {
-      setConnected(false);
-    });
+    const onPriceTick = (tick) => {
+      if (tick.isIndex && tick.symbol) {
+        setIndexes(prev => {
+          const existing = prev[tick.symbol] || {};
+          const updated = {
+            ...prev,
+            [tick.symbol]: {
+              ...existing,
+              name: tick.symbol,
+              ltp: tick.ltp,
+              change: tick.change,
+              changePercent: tick.changePercent,
+            }
+          };
+          return updated;
+        });
+      }
+    };
 
-    return () => socket.disconnect();
+    socket.on("connect", onConnect);
+    socket.on("disconnect", onDisconnect);
+    socket.on("marketData", onMarketData);
+    socket.on("priceTick", onPriceTick);
+
+    if (socket.connected) setConnected(true);
+
+    return () => {
+      socket.off("connect", onConnect);
+      socket.off("disconnect", onDisconnect);
+      socket.off("marketData", onMarketData);
+      socket.off("priceTick", onPriceTick);
+    };
   }, []);
 
   const formatNumber = (num) => {

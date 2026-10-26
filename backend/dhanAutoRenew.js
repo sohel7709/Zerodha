@@ -20,35 +20,37 @@
  * warnings in your server logs without having to check manually.
  */
 
-const cron         = require('node-cron');
-const tokenService = require('./tokenService');
+const cron            = require('node-cron');
+const tokenService    = require('./tokenService');
+const dhanAuthService = require('./dhanAuthService');
 
-// ─── Daily health check (8:30 AM IST = 3:00 AM UTC) ─────────────────────────
+// ─── Automated Token Refresh & Health Check ──────────────────────────────────
 function startAutoRenewCron() {
-    cron.schedule('0 3 * * 1-6', () => {
-        const status = tokenService.getTokenStatus();
-        if (!status.configured) {
-            console.warn('[TokenCron] No Dhan token configured. Update via POST /admin/update-token or /admin/token web page.');
-            return;
-        }
-        if (status.expired) {
-            console.error('[TokenCron] ⛔ Dhan token has EXPIRED. Open https://dhanhq.co/developers → Generate Token, then visit /admin/token to update.');
-        } else if (status.hoursLeft < 2) {
-            console.error(`[TokenCron] ⚠️  Token expires in ${Math.round(status.hoursLeft * 60)} minutes! Update now via /admin/token`);
-        } else if (status.hoursLeft < 6) {
-            console.warn(`[TokenCron] ⚠️  Token expires in ${status.hoursLeft}h. Update today via /admin/token`);
-        } else {
-            console.log(`[TokenCron] ✅ Token valid | ${status.hoursLeft}h remaining | expires ${status.expiresAt}`);
+    // 8:30 AM IST (3:00 AM UTC) every trading day: Auto-generate fresh 24-hour token
+    cron.schedule('0 3 * * 1-6', async () => {
+        console.log('[TokenCron] 8:30 AM IST — Auto-generating fresh Dhan access token via TOTP...');
+        try {
+            await dhanAuthService.generateToken();
+        } catch (e) {
+            console.error('[TokenCron] Morning auto-refresh error:', e.message);
         }
     }, { timezone: 'UTC' });
 
-    // Immediate check on startup
-    const status = tokenService.getTokenStatus();
-    if (status.configured && status.hoursLeft != null && status.hoursLeft < 8) {
-        console.warn(`[TokenCron] ⚠️  Token expires in ${status.hoursLeft}h — update via /admin/token or POST /admin/update-token`);
-    }
+    // Safety check every 3 hours: auto-renew or re-generate if expiring within 90 minutes
+    cron.schedule('0 */3 * * *', async () => {
+        try {
+            await dhanAuthService.ensureValidToken();
+        } catch (e) {
+            console.warn('[TokenCron] Periodic health check warning:', e.message);
+        }
+    }, { timezone: 'UTC' });
 
-    console.log('[TokenCron] Daily health check scheduled: 8:30 AM IST (Mon–Sat)');
+    // Startup check: ensure valid token right away
+    dhanAuthService.ensureValidToken().catch(e => {
+        console.warn('[TokenCron] Startup token check:', e.message);
+    });
+
+    console.log('[TokenCron] Automated TOTP Token Renewal scheduled: 8:30 AM IST daily + 3h safety loop');
 }
 
 module.exports = { startAutoRenewCron };
