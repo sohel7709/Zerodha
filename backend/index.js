@@ -18,6 +18,7 @@ const { CorporateActionModel } = require('./model/CorporateActionModel');
 const marketDataService  = require('./marketDataService');
 const tokenService       = require('./tokenService');
 const dhanAutoRenew      = require('./dhanAutoRenew');
+const emailAlertService  = require('./emailAlertService');
 let ioInstance = null; // set after io is created
 const candleDataService = require('./candleDataService');
 const { ChatModel } = require('./model/ChatModel');
@@ -3188,7 +3189,14 @@ app.get('/admin/token', (req, res) => {
 
       <div class="cron-info">
         <span>⏱️</span>
-        <span><strong>Automated Background Renewal:</strong> Active every weekday at 8:30 AM IST + 3-hour safety loop.</span>
+        <span><strong>Automated Background Renewal:</strong> Active daily at 8:30 AM IST (unconditional) with 3 auto-retries + 3-hour fail-safe loop.</span>
+      </div>
+
+      <div class="cron-info" style="margin-top: 8px; border-left: 3px solid #3b82f6;">
+        <span>📧</span>
+        <span><strong>Failure Alert Emails:</strong> pathansp1234@gmail.com, Ashokwaghmode9@gmail.com
+          <br><button onclick="testEmailAlert()" style="background: none; border: none; color: #2563eb; font-weight: 600; cursor: pointer; padding: 4px 0 0; font-size: 11px; text-decoration: underline;">Send Test Alert Email</button>
+        </span>
       </div>
 
       <details>
@@ -3362,6 +3370,21 @@ app.get('/admin/token', (req, res) => {
       }
     }
 
+    async function testEmailAlert() {
+      showToast('⏳ Sending test alert email...', 'info');
+      try {
+        const res = await fetch('/admin/test-alert-email', { method: 'POST' });
+        const data = await res.json();
+        if (data.sent) {
+          showToast('✅ Test alert email sent to ' + data.recipients.join(', '), 'success');
+        } else {
+          showToast('⚠️ SMTP not configured yet: ' + (data.reason || data.error), 'error');
+        }
+      } catch (err) {
+        showToast('❌ Failed to trigger test email: ' + err.message, 'error');
+      }
+    }
+
     function showToast(msg, type) {
       const el = document.getElementById('toast');
       el.textContent = msg;
@@ -3436,6 +3459,15 @@ app.post('/admin/refresh-token', async (req, res) => {
     try {
         const result = await dhanAuthService.generateToken();
         res.json({ message: 'Token refreshed successfully via Dhan TOTP', ...result });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.post('/admin/test-alert-email', async (req, res) => {
+    try {
+        const result = await emailAlertService.sendTestEmail();
+        res.json(result);
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
