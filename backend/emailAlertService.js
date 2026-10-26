@@ -35,74 +35,245 @@ function getTransporter() {
 function buildHtmlTemplate({ error, attempts, failedAt, recipients }) {
     return `
     <!DOCTYPE html>
-    <html>
+    <html lang="en">
     <head>
       <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width, initial-scale=1.0">
+      <title>Zerodha Kite Operational Alert</title>
       <style>
-        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; background-color: #f8fafc; margin: 0; padding: 24px; color: #1e293b; }
-        .container { max-width: 580px; margin: 0 auto; background: #ffffff; border-radius: 12px; border: 1px solid #fee2e2; box-shadow: 0 4px 16px rgba(220, 38, 38, 0.08); overflow: hidden; }
-        .header { background: #dc2626; padding: 24px 28px; color: #ffffff; }
-        .header h1 { margin: 0; font-size: 20px; font-weight: 700; letter-spacing: -0.3px; }
-        .header p { margin: 6px 0 0; font-size: 13px; opacity: 0.95; }
-        .content { padding: 28px; }
-        .alert-box { background: #fef2f2; border-left: 4px solid #ef4444; padding: 14px 18px; border-radius: 6px; margin-bottom: 22px; }
-        .alert-box strong { color: #991b1b; display: block; margin-bottom: 4px; font-size: 14px; }
-        .alert-box p { margin: 0; font-size: 13px; color: #7f1d1d; word-break: break-all; }
-        .meta-table { width: 100%; border-collapse: collapse; margin-bottom: 24px; font-size: 13px; }
-        .meta-table td { padding: 10px 0; border-bottom: 1px solid #f1f5f9; }
-        .meta-table td:first-child { color: #64748b; font-weight: 600; width: 40%; }
-        .meta-table td:last-child { color: #0f172a; font-weight: 500; }
-        .btn-wrapper { text-align: center; margin: 28px 0; }
-        .btn { display: inline-block; background: #2563eb; color: #ffffff !important; font-weight: 700; font-size: 15px; padding: 14px 28px; text-decoration: none; border-radius: 8px; box-shadow: 0 4px 12px rgba(37, 99, 235, 0.25); }
-        .btn:hover { background: #1d4ed8; }
-        .footer { background: #f8fafc; border-top: 1px solid #e2e8f0; padding: 18px 28px; font-size: 12px; color: #94a3b8; text-align: center; }
+        body {
+          margin: 0;
+          padding: 32px 16px;
+          background-color: #0b1120;
+          font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+          color: #334155;
+          -webkit-font-smoothing: antialiased;
+        }
+        .wrapper {
+          max-width: 600px;
+          margin: 0 auto;
+          background: #ffffff;
+          border-radius: 16px;
+          overflow: hidden;
+          box-shadow: 0 20px 40px rgba(0, 0, 0, 0.4);
+          border: 1px solid #1e293b;
+        }
+        .header {
+          background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
+          padding: 32px 32px 24px;
+          border-bottom: 2px solid #ef4444;
+        }
+        .badge-row {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+          margin-bottom: 12px;
+        }
+        .pill-critical {
+          display: inline-block;
+          background: #dc2626;
+          color: #ffffff;
+          font-size: 11px;
+          font-weight: 800;
+          letter-spacing: 0.8px;
+          text-transform: uppercase;
+          padding: 4px 10px;
+          border-radius: 20px;
+        }
+        .pill-system {
+          display: inline-block;
+          color: #94a3b8;
+          font-size: 11px;
+          font-weight: 600;
+          letter-spacing: 0.5px;
+          text-transform: uppercase;
+          margin-left: 8px;
+        }
+        .header h1 {
+          margin: 0;
+          font-size: 22px;
+          font-weight: 700;
+          color: #ffffff;
+          letter-spacing: -0.4px;
+          line-height: 1.3;
+        }
+        .header p {
+          margin: 8px 0 0;
+          font-size: 13px;
+          color: #94a3b8;
+          line-height: 1.5;
+        }
+        .content {
+          padding: 32px;
+        }
+        .alert-callout {
+          background: #fff1f2;
+          border: 1px solid #fecdd3;
+          border-left: 4px solid #e11d48;
+          border-radius: 8px;
+          padding: 16px 18px;
+          margin-bottom: 28px;
+        }
+        .alert-callout-title {
+          font-size: 14px;
+          font-weight: 700;
+          color: #9f1239;
+          margin-bottom: 6px;
+          display: flex;
+          align-items: center;
+          gap: 6px;
+        }
+        .alert-callout-msg {
+          font-size: 13px;
+          color: #881337;
+          margin: 0;
+          line-height: 1.5;
+          word-break: break-word;
+          font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+        }
+        .meta-card {
+          background: #f8fafc;
+          border: 1px solid #e2e8f0;
+          border-radius: 10px;
+          padding: 6px 18px;
+          margin-bottom: 28px;
+        }
+        .meta-row {
+          display: flex;
+          justify-content: space-between;
+          padding: 12px 0;
+          border-bottom: 1px solid #edf2f7;
+          font-size: 13px;
+        }
+        .meta-row:last-child {
+          border-bottom: none;
+        }
+        .meta-label {
+          color: #64748b;
+          font-weight: 600;
+        }
+        .meta-value {
+          color: #0f172a;
+          font-weight: 600;
+          text-align: right;
+        }
+        .meta-value.danger {
+          color: #dc2626;
+        }
+        .action-box {
+          text-align: center;
+          background: #f1f5f9;
+          border-radius: 12px;
+          padding: 24px 20px;
+          margin: 28px 0;
+        }
+        .action-box p {
+          margin: 0 0 16px;
+          font-size: 14px;
+          font-weight: 500;
+          color: #334155;
+          line-height: 1.5;
+        }
+        .btn-primary {
+          display: inline-block;
+          background: #2563eb;
+          color: #ffffff !important;
+          text-decoration: none;
+          font-size: 15px;
+          font-weight: 700;
+          padding: 14px 32px;
+          border-radius: 8px;
+          box-shadow: 0 4px 14px rgba(37, 99, 235, 0.35);
+          letter-spacing: -0.2px;
+          transition: background 0.15s ease;
+        }
+        .direct-link {
+          margin-top: 14px;
+          font-size: 12px;
+          color: #64748b;
+        }
+        .direct-link a {
+          color: #2563eb;
+          text-decoration: underline;
+          word-break: break-all;
+        }
+        .instructions {
+          font-size: 12px;
+          color: #64748b;
+          line-height: 1.6;
+          border-top: 1px solid #f1f5f9;
+          padding-top: 20px;
+        }
+        .footer {
+          background: #0f172a;
+          padding: 24px 32px;
+          color: #64748b;
+          font-size: 11px;
+          line-height: 1.6;
+          border-top: 1px solid #1e293b;
+        }
+        .footer strong {
+          color: #94a3b8;
+        }
       </style>
     </head>
     <body>
-      <div class="container">
+      <div class="wrapper">
         <div class="header">
-          <h1>🚨 Action Required: Dhan Token Renewal Failed</h1>
-          <p>Zerodha Kite Automated Morning Renewal (8:30 AM IST)</p>
+          <div class="badge-row">
+            <span class="pill-critical">CRITICAL ALERT</span>
+            <span class="pill-system">ZERODHA KITE OPERATIONS</span>
+          </div>
+          <h1>Action Required: Dhan Token Renewal Failed</h1>
+          <p>The automated morning authentication service could not refresh the Dhan market access token for today's trading session.</p>
         </div>
+
         <div class="content">
-          <div class="alert-box">
-            <strong>Automatic Token Generation Failed</strong>
-            <p>${error || 'Unknown error during TOTP token generation'}</p>
+          <div class="alert-callout">
+            <div class="alert-callout-title">⚠️ Handshake Error Details</div>
+            <p class="alert-callout-msg">${error || 'Dhan API endpoint did not respond or returned invalid credentials.'}</p>
           </div>
 
-          <table class="meta-table">
-            <tr>
-              <td>Time of Failure</td>
-              <td>${failedAt} IST</td>
+          <table style="width: 100%; border-collapse: collapse; margin-bottom: 24px; font-size: 13px; background: #f8fafc; border-radius: 10px; border: 1px solid #e2e8f0; overflow: hidden;">
+            <tr style="border-bottom: 1px solid #e2e8f0;">
+              <td style="padding: 12px 16px; color: #64748b; font-weight: 600;">Incident Time</td>
+              <td style="padding: 12px 16px; color: #0f172a; font-weight: 700; text-align: right;">${failedAt} IST</td>
+            </tr>
+            <tr style="border-bottom: 1px solid #e2e8f0;">
+              <td style="padding: 12px 16px; color: #64748b; font-weight: 600;">Dhan Client ID</td>
+              <td style="padding: 12px 16px; color: #0f172a; font-weight: 700; text-align: right;">1112426535 (SOHEL PATHAN)</td>
+            </tr>
+            <tr style="border-bottom: 1px solid #e2e8f0;">
+              <td style="padding: 12px 16px; color: #64748b; font-weight: 600;">Automated Retries</td>
+              <td style="padding: 12px 16px; color: #d97706; font-weight: 700; text-align: right;">${attempts} attempts exhausted</td>
             </tr>
             <tr>
-              <td>Retry Attempts</td>
-              <td>${attempts} attempts made before alert</td>
-            </tr>
-            <tr>
-              <td>Status</td>
-              <td><span style="color: #dc2626; font-weight: 700;">Market Feed at Risk of Interruption</span></td>
+              <td style="padding: 12px 16px; color: #64748b; font-weight: 600;">Operational Impact</td>
+              <td style="padding: 12px 16px; color: #dc2626; font-weight: 700; text-align: right;">Live Ticks & WebSocket Stream at Risk</td>
             </tr>
           </table>
 
-          <p style="font-size: 14px; line-height: 1.6; color: #334155;">
-            The 8:30 AM morning automated TOTP renewal encountered an issue with the Dhan API.
-            You can generate and activate a fresh 24-hour token immediately with 1-click on your live Admin dashboard:
-          </p>
-
-          <div class="btn-wrapper">
-            <a href="${ADMIN_URL}" class="btn" target="_blank">
+          <div class="action-box">
+            <p>You can regenerate and activate a fresh 24-hour token with <strong>1-click</strong> right now on the live admin console:</p>
+            <a href="${ADMIN_URL}" class="btn-primary" target="_blank">
               ⚡ Open Admin & Generate Token (1-Click)
             </a>
+            <div class="direct-link">
+              Or copy this URL into your browser:<br>
+              <a href="${ADMIN_URL}">${ADMIN_URL}</a>
+            </div>
           </div>
 
-          <p style="font-size: 12px; color: #64748b; line-height: 1.5;">
-            Or visit directly in any browser:<br>
-            <a href="${ADMIN_URL}" style="color: #2563eb;">${ADMIN_URL}</a>
-          </p>
+          <div class="instructions">
+            <strong>Emergency Manual Override:</strong><br>
+            If Dhan's TOTP service is undergoing maintenance, log into <a href="https://dhanhq.co/developers" target="_blank" style="color: #2563eb;">dhanhq.co/developers</a>, click <em>Generate Token</em>, open the Admin link above, expand <em>Emergency Manual Override</em>, paste your token, and click Save.
+          </div>
         </div>
+
         <div class="footer">
-          Zerodha Kite Auto-Renewal Service · Notifications sent to ${recipients.join(', ')}
+          <strong>Zerodha Kite System Engine</strong> · Deployed on Railway Production<br>
+          This is an automated operational alert dispatched to authorized administrators:<br>
+          ${recipients.join(', ')}
         </div>
       </div>
     </body>
