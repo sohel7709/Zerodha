@@ -76,7 +76,7 @@ function loadScripMaster() {
 async function _doLoadScripMaster() {
     try {
         const res = await fetch(SCRIP_MASTER_URL, {
-            signal: AbortSignal.timeout(60000),
+            signal: AbortSignal.timeout(15000),
             headers: { 'User-Agent': 'Mozilla/5.0' },
         });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -164,7 +164,9 @@ async function fetchDhanStockQuotes(symbols) {
         return {};
     }
 
-    if (!scripMasterLoaded) await loadScripMaster();
+    if (!scripMasterLoaded && !scripMasterLoading) {
+        loadScripMaster().catch(() => {});
+    }
 
     // Build security ID list and reverse map for this request
     const reqSecIds = [];
@@ -263,7 +265,9 @@ async function fetchDhanStockQuotes(symbols) {
  */
 async function fetchDhanLTP(symbols) {
     if (!isConfigured()) return {};
-    if (!scripMasterLoaded) await loadScripMaster();
+    if (!scripMasterLoaded && !scripMasterLoading) {
+        loadScripMaster().catch(() => {});
+    }
 
     const reqSecIds = [];
     const idToSym = {};
@@ -357,7 +361,9 @@ async function fetchDhanChart({ securityId, exchangeSegment, instrument, fromDat
  * wants { date: 'YYYY-MM-DD', ... } rather than epoch-second `time`.
  */
 async function fetchDhanHistoricalDaily(symbol, fromDate, toDate) {
-    if (!scripMasterLoaded) await loadScripMaster();
+    if (!scripMasterLoaded && !scripMasterLoading) {
+        loadScripMaster().catch(() => {});
+    }
     const securityId = securityIdMap[symbol];
     if (!securityId) {
         console.log(`[Dhan] No security ID for historical fetch: ${symbol}`);
@@ -376,7 +382,9 @@ async function fetchDhanHistoricalDaily(symbol, fromDate, toDate) {
  */
 async function fetchDhanBseQuote(symbol) {
     if (!isConfigured()) return null;
-    if (!scripMasterLoaded) await loadScripMaster();
+    if (!scripMasterLoaded && !scripMasterLoading) {
+        loadScripMaster().catch(() => {});
+    }
 
     const hit = bseQuoteCache[symbol];
     if (hit && Date.now() - hit.at < BSE_QUOTE_TTL) return hit.data;
@@ -562,7 +570,9 @@ async function fetchDhanLTPAll(symbols) {
 // Returns: { stocks: { [sym]: fullQuote }, indexes: { [name]: fullQuote } }
 async function fetchDhanSnapshot(symbols) {
     if (!isConfigured()) return { stocks: {}, indexes: {} };
-    if (!scripMasterLoaded) await loadScripMaster();
+    if (!scripMasterLoaded && !scripMasterLoading) {
+        loadScripMaster().catch(() => {});
+    }
 
     const idToSym = {};
     const stockIds = [];

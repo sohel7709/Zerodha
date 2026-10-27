@@ -109,10 +109,13 @@ class DhanFeedService {
             this.ws.on('open', () => {
                 console.log('[DhanFeed] WebSocket connected successfully');
                 this.connected = true;
-                this.reconnectAttempts = 0;
                 this._notifyStatus('CONNECTED');
                 this._startHeartbeat();
                 this._resubscribeAll();
+                if (this._stableTimer) clearTimeout(this._stableTimer);
+                this._stableTimer = setTimeout(() => {
+                    this.reconnectAttempts = 0;
+                }, 15000);
             });
 
             this.ws.on('message', (data) => {
@@ -125,13 +128,14 @@ class DhanFeedService {
                 this.connected = false;
                 this._cleanup();
                 this._notifyStatus('DISCONNECTED');
-                this._scheduleReconnect();
+                this._scheduleReconnect(code === 1006 ? 'closed 1006' : reasonStr);
             });
 
             this.ws.on('error', (err) => {
                 console.error('[DhanFeed] WebSocket error:', err.message);
                 if (this.onError) this.onError(err);
                 this._notifyStatus('ERROR', err.message);
+                this._scheduleReconnect(err.message);
             });
 
             this.ws.on('ping', () => {
@@ -360,10 +364,23 @@ class DhanFeedService {
         }
     }
 
-    _scheduleReconnect() {
+    _scheduleReconnect(errMessage = '') {
         if (this.reconnectTimer) return;
+        if (this._stableTimer) {
+            clearTimeout(this._stableTimer);
+            this._stableTimer = null;
+        }
         this.reconnectAttempts++;
-        const delay = Math.min(3000 * Math.pow(1.5, this.reconnectAttempts - 1), 15000);
+        const isRateLimited = typeof errMessage === 'string' && (errMessage.includes('429') || errMessage.includes('rate'));
+        let delay;
+        if (isRateLimited) {
+            delay = 60000;
+            console.warn('[DhanFeed] Rate-limited (429) by Dhan. Backing off 60s before reconnect...');
+        } else if (this.reconnectAttempts > 4) {
+            delay = Math.min(30000 + (this.reconnectAttempts - 4) * 10000, 90000); // 30s to 90s
+        } else {
+            delay = Math.min(5000 * Math.pow(1.5, this.reconnectAttempts - 1), 30000);
+        }
         console.log(`[DhanFeed] Scheduling reconnect attempt #${this.reconnectAttempts} in ${Math.round(delay / 1000)}s...`);
 
         this.reconnectTimer = setTimeout(() => {
