@@ -30,6 +30,7 @@ const dhanAuthService = require('./dhanAuthService');
 const { DhanFeedService } = require('./dhanFeedService');
 const rules = require('./marketRules');
 const orderEngine = require('./orderEngine');
+const cacheMemory = require('./cacheMemoryService');
 const { calcCharges } = require('./chargesService');
 
 const PORT = process.env.PORT || 8080;
@@ -80,10 +81,11 @@ if (MONGO_URI) {
 // causing P&L to flicker to a wrong value on every refresh before the next
 // socket tick corrected it.
 function withLiveLtp(doc) {
-    const live = marketDataService.getStockPrice(doc.stockSymbol);
+    const raw = (doc && typeof doc.toObject === 'function') ? doc.toObject() : (doc || {});
+    const live = marketDataService.getStockPrice(raw.stockSymbol);
     return {
-        ...doc.toObject(),
-        ltp: live?.ltp ?? doc.ltp,
+        ...raw,
+        ltp: live?.ltp ?? raw.ltp,
         // Day's change (today's price move, NOT the holding's overall P&L) —
         // needed for the Holdings screen's "LTP (day %)" row and the
         // aggregate "Day's P&L" footer, same numbers real Kite shows.
@@ -92,17 +94,17 @@ function withLiveLtp(doc) {
     };
 }
 
-// ============ HOLDINGS ============
+// ============ HOLDINGS (Served from RAM Cache) ============
 app.get('/allHoldings', async (req, res) => {
     try {
-        const allHoldings = await HoldingsModel.find({});
+        const allHoldings = await cacheMemory.getHoldings();
         res.status(200).json(allHoldings.map(withLiveLtp));
     } catch (err) {
         res.status(500).json({ message: 'Error fetching holdings', error: err.message });
     }
 });
 
-// ============ POSITIONS ============
+// ============ POSITIONS (Served from RAM Cache) ============
 // Live LTP + realised (today's matched round-trips) + unrealised (mark-to-
 // market on the still-open quantity) for one equity position.
 async function enrichEquityPosition(doc) {
@@ -114,7 +116,7 @@ async function enrichEquityPosition(doc) {
 
 app.get('/allPositions', async (req, res) => {
     try {
-        const allPositions = await PositionsModel.find({});
+        const allPositions = await cacheMemory.getPositions();
         res.status(200).json(await Promise.all(allPositions.map(enrichEquityPosition)));
     } catch (err) {
         res.status(500).json({ message: 'Error fetching positions', error: err.message });
@@ -127,8 +129,8 @@ app.get('/allPositions', async (req, res) => {
 app.get('/positions/dayPnl', async (req, res) => {
     try {
         const [equityPositions, optionPositionsRaw, totalRealizedPnl] = await Promise.all([
-            PositionsModel.find({}),
-            OptionPositionsModel.find({}),
+            cacheMemory.getPositions(),
+            cacheMemory.getOptionPositions(),
             computeTotalRealizedPnlToday(),
         ]);
         const equity  = await Promise.all(equityPositions.map(enrichEquityPosition));
@@ -1216,6 +1218,7 @@ app.post('/funds/deposit', async (req, res) => {
             reference: `UTR${Date.now()}${Math.floor(Math.random() * 1000)}`,
         });
         await txn.save();
+        cacheMemory.invalidateWallet();
 
         io.emit('walletUpdated', { wallet: wallet.toObject(), transaction: txn });
         res.status(200).json({ message: 'Deposit successful', wallet, transaction: txn });
@@ -1244,6 +1247,7 @@ app.post('/funds/withdraw', async (req, res) => {
         // Same fix as /funds/deposit — must include blockedMargin.
         wallet.availableMargin = Math.max(0, wallet.balance - wallet.usedMargin - (wallet.misMargin || 0) - (wallet.optionMargin || 0) - (wallet.blockedMargin || 0));
         await wallet.save();
+        cacheMemory.invalidateWallet();
 
         const txn = new FundTransactionModel({
             type: 'WITHDRAW',
@@ -1261,10 +1265,10 @@ app.post('/funds/withdraw', async (req, res) => {
     }
 });
 
-// ============ WATCHLIST ============
+// ============ WATCHLIST (Served from RAM Cache) ============
 app.get('/watchlists', async (req, res) => {
     try {
-        const watchlists = await WatchlistModel.find({});
+        const watchlists = await cacheMemory.getWatchlists();
         res.status(200).json(watchlists);
     } catch (err) {
         res.status(500).json({ message: 'Error fetching watchlists', error: err.message });
@@ -1280,6 +1284,7 @@ app.post('/watchlists', async (req, res) => {
     try {
         const watchlist = new WatchlistModel({ name, stocks: [] });
         await watchlist.save();
+        cacheMemory.invalidateWatchlists();
         res.status(201).json(watchlist);
     } catch (err) {
         res.status(500).json({ message: 'Error creating watchlist', error: err.message });
@@ -1304,6 +1309,7 @@ app.post('/watchlists/:id/stock', async (req, res) => {
         if (!watchlist.stocks.includes(symbol)) {
             watchlist.stocks.push(symbol);
             await watchlist.save();
+            cacheMemory.invalidateWatchlists();
         }
 
         // Start streaming live prices for this symbol right away
@@ -1328,6 +1334,7 @@ app.delete('/watchlists/:id/stock/:symbol', async (req, res) => {
 
         watchlist.stocks = watchlist.stocks.filter(s => s !== symbol.toUpperCase());
         await watchlist.save();
+        cacheMemory.invalidateWatchlists();
 
         res.status(200).json(watchlist);
     } catch (err) {
@@ -1340,6 +1347,7 @@ app.delete('/watchlists/:id', async (req, res) => {
 
     try {
         await WatchlistModel.findByIdAndDelete(id);
+        cacheMemory.invalidateWatchlists();
         res.status(200).json({ message: 'Watchlist deleted' });
     } catch (err) {
         res.status(500).json({ message: 'Error deleting watchlist', error: err.message });
@@ -2438,6 +2446,10 @@ async function trackPortfolioSymbols() {
 // second during market hours. No 30s hard-refresh cycle, no Groww/Yahoo.
 (async () => {
     await mongoose.connection.asPromise().catch(() => {});
+    // 1. Instantly restore closing market snapshot (stock prices, 9 indices, movers) from DB/disk in <5ms
+    await marketDataService.restoreMarketSnapshot();
+    // 2. Prime RAM cache for Holdings, Positions, Watchlists, and Wallet for sub-millisecond API responses
+    await cacheMemory.primeAll();
     await trackPortfolioSymbols();
     // Anchor Day's-P&L previous-closes to Dhan daily candles (reliable even
     // when the live quote/LTP mis-resolves a symbol like LTIM).
@@ -2449,6 +2461,14 @@ async function trackPortfolioSymbols() {
     await prepareNewTradingDay();
     initDhanLiveFeed();
 })();
+
+async function handleShutdown(signal) {
+    console.log(`[Server] Received ${signal} — persisting current market closing snapshot...`);
+    await marketDataService.persistCurrentMarketState().catch(() => {});
+    process.exit(0);
+}
+process.on('SIGTERM', () => handleShutdown('SIGTERM'));
+process.on('SIGINT', () => handleShutdown('SIGINT'));
 // Dhan-only, two-tier (no Groww/Yahoo):
 //  • fast tick every 1s → LTP endpoint (light, safely sustains 1 req/s) for
 //    live price movement + the order engine.

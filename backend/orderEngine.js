@@ -17,6 +17,7 @@ const { WalletModel }    = require('./model/WalletModel');
 const { PriceAlertModel } = require('./model/PriceAlertModel');
 const { ClosedPositionModel } = require('./model/ClosedPositionModel');
 const marketDataService  = require('./marketDataService');
+const cacheMemory = require('./cacheMemoryService');
 const { calcCharges, equitySegment } = require('./chargesService');
 const rules = require('./marketRules');
 
@@ -283,6 +284,10 @@ async function executeOrder(orderDoc, execPrice) {
             wallet: wallet?.toObject(),
         });
     }
+
+    cacheMemory.invalidateHoldings();
+    cacheMemory.invalidatePositions();
+    cacheMemory.invalidateWallet();
 
     return { order: orderDoc, trade, wallet, realizedPnl, charges };
 }

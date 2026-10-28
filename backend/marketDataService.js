@@ -6,6 +6,7 @@ const yahooFinance = (typeof _YF2 === 'function') ? new _YF2({ suppressNotices: 
 const liveDataService = require('./liveDataService');
 const dhanDataService = require('./dhanDataService');
 const candleDataService = require('./candleDataService');
+const cacheMemory = require('./cacheMemoryService');
 const { isMarketOpen } = require('./marketRules');
 
 // NSE symbols — used for Groww / Yahoo fallback
@@ -47,6 +48,47 @@ let indexData   = {};
 let lastUpdated = null;
 let isFetching  = false;
 let dataSource  = 'LOADING';
+
+async function restoreMarketSnapshot() {
+    try {
+        const snap = await cacheMemory.loadMarketSnapshot();
+        if (snap) {
+            if (snap.stockPrices && Object.keys(snap.stockPrices).length > 0) {
+                stockPrices = { ...snap.stockPrices, ...stockPrices };
+            }
+            if (snap.indexData && Object.keys(snap.indexData).length > 0) {
+                indexData = { ...snap.indexData, ...indexData };
+            }
+            if (snap.lastUpdated) lastUpdated = snap.lastUpdated;
+            dataSource = isMarketOpen('FO') ? 'DHAN_LIVE_WS' : 'MARKET_CLOSED_SNAPSHOT';
+            console.log(`[Market] 🛡️ Restored market snapshot: ${Object.keys(stockPrices).length} stocks, ${Object.keys(indexData).length} indices`);
+            return true;
+        }
+    } catch (e) {
+        console.warn('[Market] Restore snapshot warning:', e.message);
+    }
+    return false;
+}
+
+async function persistCurrentMarketState() {
+    try {
+        if (Object.keys(stockPrices).length > 0) {
+            await cacheMemory.saveMarketSnapshot({
+                stockPrices,
+                indexData,
+                marketMovers: getMarketMovers(),
+                lastUpdated: lastUpdated || new Date().toISOString(),
+            });
+        }
+    } catch (e) {
+        console.warn('[Market] Snapshot auto-persist warning:', e.message);
+    }
+}
+
+// Auto-persist market state every 3 minutes
+setInterval(() => {
+    persistCurrentMarketState().catch(() => {});
+}, 3 * 60 * 1000);
 
 // Authoritative previous-session close per symbol, sourced from Dhan DAILY
 // CANDLES rather than the live feed. Some symbols (seen on LTIM) get a
@@ -750,6 +792,8 @@ module.exports = {
     trackSymbol,
     onTrackSymbol,
     getTrackedSymbols,
+    restoreMarketSnapshot,
+    persistCurrentMarketState,
     NSE_SYMBOLS,
     NSE_STOCK_SYMBOLS,
     INDEX_SYMBOLS,
