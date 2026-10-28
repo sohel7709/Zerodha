@@ -1468,6 +1468,7 @@ app.post('/alerts', async (req, res) => {
             ocoCondition: triggerType === 'oco' ? ocoCondition : null,
         });
         await alert.save();
+        orderEngine.notifyNewActiveAlert();
         res.status(201).json(alert);
     } catch (err) {
         res.status(500).json({ message: 'Error creating alert', error: err.message });
@@ -2124,10 +2125,6 @@ function initDhanLiveFeed() {
 
                 // 2. Throttled bulk marketData emit (250ms frame) for existing UI components
                 scheduleMarketDataEmit();
-
-                // 3. Fast order engine trigger
-                orderEngine.evaluatePendingOrders().catch(() => {});
-                orderEngine.evaluateAlerts().catch(() => {});
             },
 
             onStatus: ({ status }) => {
@@ -2199,9 +2196,15 @@ async function broadcastMarketData() {
     if (_fullBroadcastBusy) return;
     _fullBroadcastBusy = true;
     try {
-        await marketDataService.fetchAllStockPrices();
+        // When WebSocket feed is connected, prices and quotes stream live continuously.
+        // Don't hammer Dhan's HTTP /marketfeed/quote endpoint which rate-limits/times out during trading hours.
+        if (!dhanFeed || !dhanFeed.isConnected()) {
+            await marketDataService.fetchAllStockPrices();
+        }
         emitMarketData();
         console.log(`[Broadcast] full | source: ${marketDataService.getDataSource()} | ${new Date().toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata' })} IST`);
+    } catch (e) {
+        console.warn('[Broadcast] Error in broadcastMarketData:', e.message);
     } finally {
         _fullBroadcastBusy = false;
     }
@@ -2460,26 +2463,36 @@ setInterval(broadcastMarketData, 15000);
 // already-cached prices (no extra Dhan calls) so both equity and option open
 // positions re-price continuously without the client ever polling for it.
 let _pnlTickBusy = false;
+let _cachedRealizedPnlToday = 0;
+let _lastRealizedPnlCheck = 0;
+
 setInterval(async () => {
     // 'FO' (15:40 close) — this loop re-prices both equity and option positions.
     if (!isMarketOpen('FO') || _pnlTickBusy) return;
     _pnlTickBusy = true;
     try {
+        const now = Date.now();
+        // Cache total realized PnL for 30s to avoid expensive trade log scans every second
+        if (now - _lastRealizedPnlCheck > 30000) {
+            _cachedRealizedPnlToday = await computeTotalRealizedPnlToday().catch(() => _cachedRealizedPnlToday);
+            _lastRealizedPnlCheck = now;
+        }
+
         const { dateStr } = istDayRange();
-        const [equityPositions, optionPositionsRaw, totalRealizedPnl, closedRaw] = await Promise.all([
+        const [equityPositions, optionPositionsRaw, closedRaw] = await Promise.all([
             PositionsModel.find({}),
             OptionPositionsModel.find({}),
-            computeTotalRealizedPnlToday(),
             ClosedPositionModel.find({ dateStr }).sort({ closedAt: -1 }).lean(),
         ]);
+
+        if (equityPositions.length === 0 && optionPositionsRaw.length === 0 && closedRaw.length === 0) {
+            io.emit('positionsTick', { positions: [], optionPositions: [], closedPositions: [], totalPnl: _cachedRealizedPnlToday, totalRealizedPnl: _cachedRealizedPnlToday, at: now });
+            return;
+        }
 
         const equity = equityPositions.length > 0 ? await Promise.all(equityPositions.map(enrichEquityPosition)) : [];
         const options = optionPositionsRaw.length > 0 ? await enrichOptionPositions(optionPositionsRaw) : [];
 
-        // Squared-off rows keep their booked pnl frozen forever, but the LTP
-        // shown alongside them still tracks the live market — re-priced here
-        // from the same already-cached quotes as the open positions above,
-        // so it costs nothing extra per tick.
         const closed = await Promise.all(closedRaw.map(async (c) => {
             if (c.kind === 'option' && c.underlyingSymbol) {
                 const liveLtp = await getLiveOptionLTP(c.underlyingSymbol, c.strikePrice, c.optionType, c.expiry);
@@ -2489,16 +2502,12 @@ setInterval(async () => {
             return { ...c, ltp: live?.ltp ?? c.exitPrice };
         }));
 
-        // Total P&L = every symbol's realised P&L today (even ones already
-        // squared off and gone from the open-position lists) + unrealised
-        // mark-to-market on whatever is still open — so booking a profit/loss
-        // on one leg keeps moving the total even after that position closes.
         const totalUnrealizedPnl = equity.reduce((s, p) => s + p.unrealizedPnl, 0) + options.reduce((s, p) => s + p.unrealizedPnl, 0);
-        const totalPnl = Math.round((totalRealizedPnl + totalUnrealizedPnl) * 100) / 100;
-        io.emit('positionsTick', { positions: equity, optionPositions: options, closedPositions: closed, totalPnl, totalRealizedPnl, at: Date.now() });
+        const totalPnl = Math.round((_cachedRealizedPnlToday + totalUnrealizedPnl) * 100) / 100;
+        io.emit('positionsTick', { positions: equity, optionPositions: options, closedPositions: closed, totalPnl, totalRealizedPnl: _cachedRealizedPnlToday, at: now });
     } catch { /* next tick */ }
     finally { _pnlTickBusy = false; }
-}, 1000);
+}, 2000);
 
 // ============ DAY POSITIONS (today's F&O trades grouped by symbol) ============
 app.get('/positions/day', async (req, res) => {

@@ -350,13 +350,30 @@ async function placeOrder({ stockSymbol, quantity, price, triggerPrice, type, si
         return { ...result, immediate: true };
     }
     // LIMIT / SL / SL-M rest until evaluatePendingOrders picks them up
+    _hasPendingOrders = true;
     return { order: orderDoc, immediate: false };
+}
+
+let _hasPendingOrders = true;
+let _hasActiveAlerts = true;
+
+function notifyNewPendingOrder() {
+    _hasPendingOrders = true;
+}
+
+function notifyNewActiveAlert() {
+    _hasActiveAlerts = true;
 }
 
 // ─── Trigger engine — runs on every fast market tick ──────────────────────
 
 async function evaluatePendingOrders() {
+    if (!_hasPendingOrders) return;
     const pending = await OrdersModel.find({ status: 'PENDING' });
+    if (pending.length === 0) {
+        _hasPendingOrders = false;
+        return;
+    }
     for (const order of pending) {
         try {
             const quote = marketDataService.getStockPrice(order.stockSymbol);
@@ -393,7 +410,12 @@ function conditionMet(condition, ltp, target) {
 }
 
 async function evaluateAlerts() {
+    if (!_hasActiveAlerts) return;
     const alerts = await PriceAlertModel.find({ active: true });
+    if (alerts.length === 0) {
+        _hasActiveAlerts = false;
+        return;
+    }
     for (const alert of alerts) {
         try {
             const quote = marketDataService.getStockPrice(alert.stockSymbol);
@@ -498,6 +520,8 @@ module.exports = {
     placeOrder,
     evaluatePendingOrders,
     evaluateAlerts,
+    notifyNewPendingOrder,
+    notifyNewActiveAlert,
     squareOffAllMIS,
     checkSameDayMisSquareOff,
     recomputeBlockedMargin,
