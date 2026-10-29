@@ -1,13 +1,17 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import axios from "axios";
+import { socket } from "../socket";
 
 const Holdings = () => {
   const [allHoldings, setAllHoldings] = useState([]);
   const [loading, setLoading] = useState(true);
+  // Keep a ref so socket handlers always see the latest holdings array
+  const holdingsRef = useRef([]);
 
   useEffect(() => {
     axios.get('https://zerodha-production-production.up.railway.app/allHoldings')
       .then(res => {
+        holdingsRef.current = res.data;
         setAllHoldings(res.data);
         setLoading(false);
       })
@@ -16,6 +20,52 @@ const Holdings = () => {
         setAllHoldings([]);
         setLoading(false);
       });
+
+    // Live price updates via sub-50ms priceTick events
+    const onPriceTick = ({ symbol, ltp, change, changePercent }) => {
+      if (!symbol || !ltp) return;
+      const sym = symbol.toUpperCase();
+      const updated = holdingsRef.current.map(h =>
+        h.stockSymbol === sym
+          ? { ...h, ltp, change: change ?? h.change, changePercent: changePercent ?? h.changePercent }
+          : h
+      );
+      holdingsRef.current = updated;
+      setAllHoldings(updated);
+    };
+
+    // Bulk refresh on every marketData broadcast (handles symbols not yet in priceTick)
+    const onMarketData = ({ prices }) => {
+      if (!prices || holdingsRef.current.length === 0) return;
+      let changed = false;
+      const updated = holdingsRef.current.map(h => {
+        const p = prices[h.stockSymbol];
+        if (!p || !p.ltp) return h;
+        changed = true;
+        return { ...h, ltp: p.ltp, change: p.change ?? h.change, changePercent: p.changePercent ?? h.changePercent };
+      });
+      if (changed) {
+        holdingsRef.current = updated;
+        setAllHoldings(updated);
+      }
+    };
+
+    // Refresh holdings from initialData broadcast (e.g. after reconnect)
+    const onInitialData = ({ holdings }) => {
+      if (!holdings || holdings.length === 0) return;
+      holdingsRef.current = holdings;
+      setAllHoldings(holdings);
+    };
+
+    socket.on('priceTick', onPriceTick);
+    socket.on('marketData', onMarketData);
+    socket.on('initialData', onInitialData);
+
+    return () => {
+      socket.off('priceTick', onPriceTick);
+      socket.off('marketData', onMarketData);
+      socket.off('initialData', onInitialData);
+    };
   }, []);
 
   if (loading) return <><h3 className="title">Holdings</h3><p>Loading...</p></>;
