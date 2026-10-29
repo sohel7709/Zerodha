@@ -99,14 +99,21 @@ class DhanFeedService {
 
         try {
             console.log('[DhanFeed] Connecting to Dhan Live Market Feed...');
-            this.ws = new WebSocket(url, {
+            const ws = new WebSocket(url, {
                 headers: { 'User-Agent': 'DhanHQ-NodeJS/2.0' },
                 handshakeTimeout: 10000,
             });
+            this.ws = ws;
 
-            this.ws.binaryType = 'nodebuffer';
+            ws.binaryType = 'nodebuffer';
 
-            this.ws.on('open', () => {
+            // Every handler ignores events from a socket that is no longer
+            // `this.ws`. On token renewal the old socket is terminated and a new
+            // one created immediately; the old socket's async 'close'/'error'
+            // would otherwise flip `connected` to false, stop the new socket's
+            // heartbeat and arm a bogus reconnect timer.
+            ws.on('open', () => {
+                if (this.ws !== ws) return;
                 console.log('[DhanFeed] WebSocket connected successfully');
                 this.connected = true;
                 this._notifyStatus('CONNECTED');
@@ -118,11 +125,13 @@ class DhanFeedService {
                 }, 15000);
             });
 
-            this.ws.on('message', (data) => {
+            ws.on('message', (data) => {
+                if (this.ws !== ws) return;
                 this._handleMessage(data);
             });
 
-            this.ws.on('close', (code, reason) => {
+            ws.on('close', (code, reason) => {
+                if (this.ws !== ws) return;
                 const reasonStr = reason ? reason.toString() : 'no reason';
                 console.warn(`[DhanFeed] WebSocket closed (code: ${code}, reason: ${reasonStr})`);
                 this.connected = false;
@@ -131,19 +140,22 @@ class DhanFeedService {
                 this._scheduleReconnect(code === 1006 ? 'closed 1006' : reasonStr);
             });
 
-            this.ws.on('error', (err) => {
+            ws.on('error', (err) => {
+                if (this.ws !== ws) return;
                 console.error('[DhanFeed] WebSocket error:', err.message);
                 if (this.onError) this.onError(err);
                 this._notifyStatus('ERROR', err.message);
                 this._scheduleReconnect(err.message);
             });
 
-            this.ws.on('ping', () => {
+            ws.on('ping', () => {
+                if (this.ws !== ws) return;
                 this.lastHeartbeat = Date.now();
-                if (this.ws?.readyState === WebSocket.OPEN) this.ws.pong();
+                if (ws.readyState === WebSocket.OPEN) ws.pong();
             });
 
-            this.ws.on('pong', () => {
+            ws.on('pong', () => {
+                if (this.ws !== ws) return;
                 this.lastHeartbeat = Date.now();
             });
         } catch (e) {
@@ -403,6 +415,14 @@ class DhanFeedService {
         }
     }
 
+    // Swap in a freshly generated access token and reconnect cleanly.
+    reconnectWithToken(newToken) {
+        this.accessToken = newToken;
+        this.disconnect();
+        this.reconnectAttempts = 0;
+        this.connect();
+    }
+
     disconnect() {
         this._cleanup();
         if (this.reconnectTimer) {
@@ -410,12 +430,22 @@ class DhanFeedService {
             this.reconnectTimer = null;
         }
         if (this.ws) {
+            const old = this.ws;
+            this.ws = null;
+            // Detach handlers but keep a no-op 'error' listener: terminate() on a
+            // still-CONNECTING socket emits 'error', and with no listener Node
+            // would throw an uncaught exception and kill the whole server.
+            old.removeAllListeners();
+            old.on('error', () => {});
             try {
-                this.ws.terminate();
+                old.terminate();
             } catch {
                 // Ignore termination error
             }
-            this.ws = null;
+        }
+        if (this._stableTimer) {
+            clearTimeout(this._stableTimer);
+            this._stableTimer = null;
         }
         this.connected = false;
         this._notifyStatus('DISCONNECTED');

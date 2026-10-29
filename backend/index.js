@@ -2176,9 +2176,7 @@ function initDhanLiveFeed() {
         dhanAuthService.onTokenUpdated((newToken) => {
             if (dhanFeed) {
                 console.log('[DhanAuth] Reconnecting DhanFeed with fresh token...');
-                dhanFeed.accessToken = newToken;
-                dhanFeed.disconnect();
-                dhanFeed.connect();
+                dhanFeed.reconnectWithToken(newToken);
             }
         });
     } catch (err) {
@@ -2467,6 +2465,15 @@ async function handleShutdown(signal) {
     await marketDataService.persistCurrentMarketState().catch(() => {});
     process.exit(0);
 }
+// A stray async error (e.g. from a feed socket during token renewal) must not
+// take the API + socket.io server down for every connected client.
+process.on('unhandledRejection', (reason) => {
+    console.error('[Process] Unhandled rejection:', reason && reason.message ? reason.message : reason);
+});
+process.on('uncaughtException', (err) => {
+    console.error('[Process] Uncaught exception:', err && err.stack ? err.stack : err);
+});
+
 process.on('SIGTERM', () => handleShutdown('SIGTERM'));
 process.on('SIGINT', () => handleShutdown('SIGINT'));
 // Dhan-only, two-tier (no Groww/Yahoo):
