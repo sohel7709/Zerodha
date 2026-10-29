@@ -363,8 +363,11 @@ async function fetchAllStockPrices() {
 // LTP is all that moves tick-to-tick; OHLC/prevClose/52W are refreshed by the
 // slower snapshot below. change/changePercent are recomputed against the
 // stored previousClose so Day's P&L stays consistent with the LTP.
+// Rate-limit self-guard: if Dhan returned 429 recently, skip this tick.
+let _fastRefresh429Until = 0;
 async function fastRefresh() {
     if (!dhanDataService.isConfigured()) return;
+    if (Date.now() < _fastRefresh429Until) return; // back off after 429
     try {
         const ltps = await dhanDataService.fetchDhanLTPAll(getTrackedSymbols());
         for (const [key, val] of Object.entries(ltps)) {
@@ -419,7 +422,13 @@ async function fastRefresh() {
         lastUpdated = new Date().toISOString();
     } catch (e) {
         // Keep last good prices on a transient Dhan error/429.
-        console.warn('[Market] fastRefresh error:', e.message);
+        // If 429, pause REST polling for 60s to avoid hammering Dhan.
+        if (e.message && (e.message.includes('429') || e.message.includes('Too many'))) {
+            _fastRefresh429Until = Date.now() + 60000;
+            console.warn('[Market] fastRefresh 429 — pausing REST poll for 60s');
+        } else {
+            console.warn('[Market] fastRefresh error:', e.message);
+        }
     }
 }
 

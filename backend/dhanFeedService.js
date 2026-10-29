@@ -122,6 +122,7 @@ class DhanFeedService {
                 if (this._stableTimer) clearTimeout(this._stableTimer);
                 this._stableTimer = setTimeout(() => {
                     this.reconnectAttempts = 0;
+                    this._consecutive1006 = 0; // reset 1006 counter after stable connection
                 }, 15000);
             });
 
@@ -383,15 +384,35 @@ class DhanFeedService {
             this._stableTimer = null;
         }
         this.reconnectAttempts++;
+
         const isRateLimited = typeof errMessage === 'string' && (errMessage.includes('429') || errMessage.includes('rate'));
+        // Code 1006 = abnormal close (network drop / server-side disconnect).
+        // Reconnecting too fast causes a burst of new WS connects that Dhan
+        // rate-limits with 429, which in turn generates more 1006 closes →
+        // vicious cycle. Track consecutive 1006s and back off aggressively.
+        const is1006 = typeof errMessage === 'string' && errMessage.includes('1006');
+        if (is1006) {
+            this._consecutive1006 = (this._consecutive1006 || 0) + 1;
+        } else if (!isRateLimited) {
+            this._consecutive1006 = 0;
+        }
+
         let delay;
         if (isRateLimited) {
+            // Explicit 429 — wait full minute before retrying
             delay = 60000;
             console.warn('[DhanFeed] Rate-limited (429) by Dhan. Backing off 60s before reconnect...');
+        } else if (this._consecutive1006 >= 3) {
+            // 3+ consecutive 1006s → probable Dhan-side rate-limit / server reject.
+            // Back off hard: 90s, then up to 3 min.
+            delay = Math.min(90000 + (this._consecutive1006 - 3) * 30000, 180000);
+            console.warn(`[DhanFeed] ${this._consecutive1006} consecutive 1006 closes — possible Dhan rate-limit. Backing off ${Math.round(delay / 1000)}s...`);
         } else if (this.reconnectAttempts > 4) {
-            delay = Math.min(30000 + (this.reconnectAttempts - 4) * 10000, 90000); // 30s to 90s
+            delay = Math.min(30000 + (this.reconnectAttempts - 4) * 10000, 90000); // 30s → 90s
         } else {
-            delay = Math.min(5000 * Math.pow(1.5, this.reconnectAttempts - 1), 30000);
+            // Start at 10s (not 5s) so a quick disconnect doesn't immediately
+            // hammer Dhan with a reconnect during high-activity market hours.
+            delay = Math.min(10000 * Math.pow(1.5, this.reconnectAttempts - 1), 30000);
         }
         console.log(`[DhanFeed] Scheduling reconnect attempt #${this.reconnectAttempts} in ${Math.round(delay / 1000)}s...`);
 
